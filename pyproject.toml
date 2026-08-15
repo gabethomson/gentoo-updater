@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gentoo-updater"
+version = "0.1.0"
+description = "A safer, structured wrapper around portage world updates"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "kenny" }]
+keywords = ["gentoo", "portage", "emerge", "update", "sysadmin"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Systems Administration",
+]
+
+# rich is optional -- the tool degrades to plain output without it.
+dependencies = []
+
+[project.optional-dependencies]
+pretty = ["rich>=13.0"]
+
+[project.scripts]
+gup = "gentoo_updater.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/kenny/gentoo-updater"
+Issues = "https://github.com/kenny/gentoo-updater/issues"
+
+[tool.setuptools.packages.find]
+include = ["gentoo_updater*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
