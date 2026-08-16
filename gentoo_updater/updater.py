@@ -4,11 +4,14 @@ on its own. It drives portage's own tools; it never reimplements them."""
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import shutil
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+
+_log = logging.getLogger("gentoo_updater.updater")
 
 from . import __version__
 from .runner import CommandRunner, CommandResult
@@ -550,12 +553,17 @@ class Updater:
                                           detail="skipped by flag")
                     self.report.add(skipped)
                     ui.phase_done(skipped)
+                    _log.info("phase %s: skipped by flag", name)
                     continue
 
+                _log.info("phase %s: start", name)
                 ui.phase_header(name)
                 result = fn()
                 self.report.add(result)
                 ui.phase_done(result)
+                _log.info("phase %s: %s (%s)", name,
+                          "skip" if result.skipped else "ok" if result.ok
+                          else "FAIL", result.detail)
 
                 # A failed fatal phase stops the run. apply is not fatal, so we
                 # still reach verify to report the damage.

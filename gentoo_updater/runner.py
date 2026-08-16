@@ -4,11 +4,15 @@ dry_run short-circuits anything that would change the system."""
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
+import time
 from dataclasses import dataclass
 
 from . import ui
+
+_log = logging.getLogger("gentoo_updater.runner")
 
 
 @dataclass
@@ -67,12 +71,24 @@ class CommandRunner:
         if self.dry_run and self._needs_root(cmd):
             ui.dim(f"[dry-run] would run: {' '.join(full)}")
             return CommandResult(returncode=0)
+        _log.debug("capture: %s", " ".join(full))
+        start = time.time()
         try:
-            proc = subprocess.run(full, capture_output=True, text=True,
-                                  check=False, env=_c_locale_env())
-            return CommandResult(proc.returncode, proc.stdout, proc.stderr)
+            # Drop the spinner while the child runs, same as stream(): a live
+            # refresh thread competing with a long subprocess is asking for
+            # trouble, and it lets the child own the terminal if it wants stdin.
+            with ui.suspend():
+                proc = subprocess.run(full, capture_output=True, text=True,
+                                      check=False, env=_c_locale_env())
         except FileNotFoundError as exc:
+            _log.debug("capture: %s -> not found", full[0])
             return CommandResult(returncode=127, stderr=str(exc))
+        _log.debug("capture done: rc=%d (%.1fs) out=%dB err=%dB",
+                   proc.returncode, time.time() - start,
+                   len(proc.stdout), len(proc.stderr))
+        if proc.returncode != 0 and proc.stderr.strip():
+            _log.debug("stderr: %s", proc.stderr.strip()[:2000])
+        return CommandResult(proc.returncode, proc.stdout, proc.stderr)
 
     def stream(self, cmd: list[str]) -> CommandResult:
         full = self._prep(cmd)
@@ -80,14 +96,19 @@ class CommandRunner:
             ui.dim(f"[dry-run] would run: {' '.join(full)}")
             return CommandResult(returncode=0)
         ui.dim(f"$ {' '.join(full)}")
+        _log.debug("stream: %s", " ".join(full))
+        start = time.time()
         try:
-            # ui.suspend() drops the live dashboard so the child gets the
-            # terminal to itself, then puts it back.
+            # ui.suspend() drops the spinner so the child gets the terminal to
+            # itself, then puts it back.
             with ui.suspend():
                 proc = subprocess.run(full, check=False)
-            return CommandResult(proc.returncode)
         except FileNotFoundError as exc:
+            _log.debug("stream: %s -> not found", full[0])
             return CommandResult(returncode=127, stderr=str(exc))
+        _log.debug("stream done: rc=%d (%.1fs)", proc.returncode,
+                   time.time() - start)
+        return CommandResult(proc.returncode)
 
     def interactive(self, cmd: list[str]) -> CommandResult:
         return self.stream(cmd)

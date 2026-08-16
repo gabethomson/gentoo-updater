@@ -4,9 +4,11 @@ config.py for the layering."""
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import sys
 
+from . import __version__
 from .runner import CommandRunner
 from .snapshot import SnapshotManager
 from .updater import Updater
@@ -14,8 +16,11 @@ from .lockfile import single_instance, AlreadyRunning
 from .config import load_config, NOTIFY_CHOICES
 from .audit import AuditLog
 from .notify import Notifier
+from . import debuglog
 from . import schedule
 from . import ui
+
+_log = logging.getLogger("gentoo_updater.cli")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -177,7 +182,24 @@ def _install_schedule(args, *, backend: str | None = None) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     ui.set_plain(args.plain)
+    log_path = debuglog.setup()
+    _log.info("gup %s command=%s argv=%s", __version__, args.command,
+              argv if argv is not None else sys.argv[1:])
+    try:
+        return _dispatch(args)
+    except KeyboardInterrupt:
+        _log.warning("interrupted by user")
+        ui.error("Interrupted.")
+        return 130
+    except Exception:  # noqa: BLE001 - log the traceback before it propagates
+        _log.exception("unhandled error")
+        raise
+    finally:
+        if log_path:
+            ui.dim(f"debug log: {log_path}")
 
+
+def _dispatch(args) -> int:
     # Scheduling setup doesn't touch portage and needs no config/updater.
     if args.command == "install-schedule":
         return _install_schedule(args)
@@ -187,62 +209,57 @@ def main(argv: list[str] | None = None) -> int:
     cfg = _effective_config(args)
     updater = _make_updater(args, cfg)
 
-    try:
-        if args.command == "update":
-            # Mutating run: hold the single-instance lock so we can't race
-            # another gup (or ourselves) part-way through a world merge.
-            try:
-                with single_instance():
-                    report = updater.run_all(
-                        skip_snapshot=cfg.no_snapshot,
-                        skip_sync=cfg.no_sync,
-                    )
-            except AlreadyRunning as exc:
-                ui.error(str(exc))
-                return 1
-            return 1 if report.failed else 0
+    if args.command == "update":
+        # Mutating run: hold the single-instance lock so we can't race another
+        # gup (or ourselves) part-way through a world merge.
+        try:
+            with single_instance():
+                report = updater.run_all(
+                    skip_snapshot=cfg.no_snapshot,
+                    skip_sync=cfg.no_sync,
+                )
+        except AlreadyRunning as exc:
+            ui.error(str(exc))
+            return 1
+        return 1 if report.failed else 0
 
-        if args.command == "rollback":
-            try:
-                with single_instance():
-                    return updater.run_rollback()
-            except AlreadyRunning as exc:
-                ui.error(str(exc))
-                return 1
+    if args.command == "rollback":
+        try:
+            with single_instance():
+                return updater.run_rollback()
+        except AlreadyRunning as exc:
+            ui.error(str(exc))
+            return 1
 
-        if args.command == "depclean":
-            try:
-                with single_instance():
-                    return updater.run_depclean()
-            except AlreadyRunning as exc:
-                ui.error(str(exc))
-                return 1
+    if args.command == "depclean":
+        try:
+            with single_instance():
+                return updater.run_depclean()
+        except AlreadyRunning as exc:
+            ui.error(str(exc))
+            return 1
 
-        if args.command == "plan":
-            # plan-only: no sync, no snapshot, no apply
-            updater.report.add(updater.phase_preflight())
-            ui.phase_header("plan")
-            result = updater.phase_plan()
-            updater.report.add(result)
-            ui.show_summary(updater.report)
-            return 0 if result.ok else 1
+    if args.command == "plan":
+        # plan-only: no sync, no snapshot, no apply
+        updater.report.add(updater.phase_preflight())
+        ui.phase_header("plan")
+        result = updater.phase_plan()
+        updater.report.add(result)
+        ui.show_summary(updater.report)
+        return 0 if result.ok else 1
 
-        if args.command == "verify":
-            ui.phase_header("verify")
-            result = updater.phase_verify()
-            updater.report.add(result)
-            ui.show_summary(updater.report)
-            return 0 if result.ok else 1
+    if args.command == "verify":
+        ui.phase_header("verify")
+        result = updater.phase_verify()
+        updater.report.add(result)
+        ui.show_summary(updater.report)
+        return 0 if result.ok else 1
 
-        if args.command == "news":
-            result = updater.phase_news()
-            updater.report.add(result)
-            ui.show_summary(updater.report)
-            return 0 if result.ok else 1
-
-    except KeyboardInterrupt:
-        ui.error("Interrupted.")
-        return 130
+    if args.command == "news":
+        result = updater.phase_news()
+        updater.report.add(result)
+        ui.show_summary(updater.report)
+        return 0 if result.ok else 1
 
     return 0
 

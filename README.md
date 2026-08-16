@@ -223,6 +223,11 @@ Notifications fire on completion when configured (`--notify`): `failure` on a
 failed run, `reboot` also when a reboot is advised, `always` every time. Sent via
 `notify-send` and/or email (`sendmail`/`mail` to `notify_email`).
 
+Every run also writes a **debug log** (each command, its exit code and timing,
+per-phase results) to `/var/log/gentoo-updater/debug.log`, or `~/.local/state/…`
+when not root. It's overwritten each run and its path is printed at the end — the
+first place to look if a run hangs or misbehaves.
+
 ## Unattended updates (systemd / OpenRC / runit)
 
 Only the scheduling differs per init. `gup install-schedule` detects your init
@@ -252,7 +257,8 @@ you.
 - Never edits `/etc/portage`; it shows the lines, you apply them.
 - A single-instance lock prevents two runs colliding.
 - `--dry-run` runs no mutating command (snapshot creation included) and skips the
-  audit write and notifications. Read-only checks still run, so it reflects real state.
+  audit write and notifications. Read-only checks still run, so it reflects real
+  state. (It still writes the debug log — that's a diagnostic, not a system change.)
 - depclean is opt-in and always asks before removing.
 
 ## Status
