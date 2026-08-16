@@ -43,7 +43,7 @@ Miss a step and you find out later — a broken linkage here, an unread warning 
 - **Tells you what's risky** — parses the pending update and flags the scary stuff (gcc, glibc, systemd, the kernel, llvm, rust, python) *before* you commit.
 - **Lets you cherry-pick** — `--select` turns the plan into a checklist; uncheck anything you want to sit out this round.
 - **Watches your back on security** — runs `glsa-check` and names any package with a known advisory against it.
-- **Won't let you skip the news** — unread news items often say "do X first". It surfaces them and, interactively, pauses so you can.
+- **Won't let you skip the news** — unread news items often say "do X first". It surfaces them, pauses so you can read them, and — the good part — at the plan step it calls out any unread item that's *specifically about a package you're updating* (via its `Display-If-Installed` header).
 - **Decodes the wall of red** — when the resolver wants keyword/USE changes, it hands you the exact `/etc/portage` lines instead of a cryptic failure.
 - **Checks its own work** — broken-linkage and preserved-rebuild scans afterward, plus the `elog` messages that usually scroll into oblivion during a big build.
 - **Tells you when to reboot** — flags updates that touched the kernel, glibc, systemd, or dbus.
@@ -119,7 +119,7 @@ Piping to a file, running under cron, or no `rich`? It quietly drops to plain li
 1. **preflight** — confirm `emerge`/`emaint` exist, note the optional tools, warn if the build dir is low on space
 2. **news** — check for unread news and offer to read it
 3. **sync** — `emaint sync -a` across every repo and overlay
-4. **plan** — `emerge -pvuDN @world`, parsed and categorised, risk flagged; on a masked resolution it hands you the `/etc/portage` fix
+4. **plan** — `emerge -pvuDN @world`, parsed and categorised, risk flagged, and cross-referenced against unread news (flags items whose `Display-If-Installed` package is in this update); on a masked resolution it hands you the `/etc/portage` fix
 5. **glsa** — `glsa-check` for known security advisories (informational)
 6. **snapshot** — the btrfs/snapper restore point
 7. **apply** — the real `@world` update

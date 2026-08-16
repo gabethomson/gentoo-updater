@@ -7,6 +7,7 @@ their work itself, only to wrap them with safety, parsing, and verification.
 
 from __future__ import annotations
 
+import glob
 import os
 import shutil
 import time
@@ -29,6 +30,11 @@ ELOG_DIR = "/var/log/portage/elog"
 # Free space below this (in GiB) in the portage build dir gets a warning before
 # a source build -- big toolchain compiles can need several GiB of scratch.
 LOW_SPACE_GIB = 5.0
+
+# Where Portage records unread news (per repo) and where the news items live.
+# Split out as module constants so tests can point them at a fixture tree.
+NEWS_UNREAD_GLOB = "/var/lib/gentoo/news/news-*.unread"
+NEWS_REPOS_GLOB = "/var/db/repos/*/metadata/news"
 
 
 class Risk(Enum):
@@ -263,11 +269,9 @@ class Updater:
             if selected is not None:
                 return selected  # selection re-planned; use its result
 
-        if plan.high_risk:
-            ui.warn("This update touches high-risk packages: "
-                    + ", ".join(sorted(plan.high_risk)))
+        news_hits = self._plan_advisories(plan)
         return PhaseResult("plan", ok=True,
-                           detail=f"{plan.total} package(s) pending")
+                           detail=self._plan_detail(plan.total, news_hits))
 
     def _selectable_items(self, plan: PretendPlan) -> list[tuple[str, str]]:
         """(name, label) rows for the picker, one per distinct package."""
@@ -312,11 +316,75 @@ class Updater:
         if plan2.total == 0:
             return PhaseResult("plan", ok=True,
                                detail="all pending packages were excluded")
-        if plan2.high_risk:
-            ui.warn("Still touches high-risk packages: "
-                    + ", ".join(sorted(plan2.high_risk)))
-        return PhaseResult("plan", ok=True,
-                           detail=f"{plan2.total} pending after exclusions")
+        news_hits = self._plan_advisories(
+            plan2, risk_prefix="Still touches high-risk packages: ")
+        detail = self._plan_detail(plan2.total, news_hits, suffix="after exclusions")
+        return PhaseResult("plan", ok=True, detail=detail)
+
+    @staticmethod
+    def _plan_detail(total: int, news_hits: int, *, suffix: str = "") -> str:
+        base = f"{total} package(s) pending"
+        if suffix:
+            base = f"{total} pending {suffix}"
+        if news_hits:
+            base += f"; {news_hits} news item(s) apply"
+        return base
+
+    def _plan_advisories(self, plan: PretendPlan, *,
+                         risk_prefix: str = "This update touches high-risk "
+                                            "packages: ") -> int:
+        """Post-plan warnings: high-risk packages, and unread news that concerns
+        packages in this update. Returns the number of relevant news items."""
+        if plan.high_risk:
+            ui.warn(risk_prefix + ", ".join(sorted(plan.high_risk)))
+        return self._warn_relevant_news(plan)
+
+    def _warn_relevant_news(self, plan: PretendPlan) -> int:
+        """Flag unread news items whose Display-If-Installed package is in the
+        pending update -- the news you most want to read before applying."""
+        names = {c.name for c in plan.changes}
+        if not names:
+            return 0
+        matches = advise.relevant_news(self._unread_news_items(), names)
+        for title, pkgs in matches:
+            ui.warn(f'Unread news applies to this update: "{title}" '
+                    f'({", ".join(pkgs)})')
+        if matches:
+            ui.hint("Read it before applying:  eselect news read")
+        return len(matches)
+
+    def _unread_news_items(self) -> list:
+        """Parse the unread news items Portage tracks. Best-effort: any I/O
+        problem yields an empty list rather than derailing the plan phase."""
+        ids: set[str] = set()
+        for state in glob.glob(NEWS_UNREAD_GLOB):
+            try:
+                with open(state, encoding="utf-8", errors="replace") as fh:
+                    ids.update(ln.strip() for ln in fh if ln.strip())
+            except OSError:
+                continue
+        items = []
+        for nid in sorted(ids):
+            text = self._read_news_file(nid)
+            if text:
+                items.append(advise.parse_news_item(text))
+        return items
+
+    @staticmethod
+    def _read_news_file(news_id: str) -> str:
+        """Read a news item's body from whichever repo carries it, preferring
+        the English text."""
+        for base in glob.glob(NEWS_REPOS_GLOB):
+            item_dir = os.path.join(base, news_id)
+            candidates = (sorted(glob.glob(os.path.join(item_dir, "*.en.txt")))
+                          or sorted(glob.glob(os.path.join(item_dir, "*.txt"))))
+            for path in candidates:
+                try:
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        return fh.read()
+                except OSError:
+                    continue
+        return ""
 
     def phase_glsa(self) -> PhaseResult:
         """Check for known security advisories (GLSAs) affecting the system.

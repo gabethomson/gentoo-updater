@@ -112,11 +112,16 @@ def make_updater(handler=_happy_handler, *, snapshots_available=False,
 
 @contextlib.contextmanager
 def env(tools):
-    """Patch tool discovery and isolate the elog scan so run_all is hermetic."""
+    """Patch tool discovery and isolate the elog scan + news globs so run_all is
+    hermetic (never reads the real /var/log or /var/lib/gentoo on the box)."""
     with mock.patch("gentoo_updater.updater.shutil.which",
                     side_effect=_which_stub(tools)), \
          mock.patch("gentoo_updater.updater.os.scandir",
-                    side_effect=FileNotFoundError):
+                    side_effect=FileNotFoundError), \
+         mock.patch("gentoo_updater.updater.NEWS_UNREAD_GLOB",
+                    "/nonexistent-gup-test/*"), \
+         mock.patch("gentoo_updater.updater.NEWS_REPOS_GLOB",
+                    "/nonexistent-gup-test/*"):
         yield
 
 
@@ -463,6 +468,37 @@ class SelectPackages(unittest.TestCase):
         with _quiet(), env(BASE_TOOLS):
             updater.run_all()
         self.assertEqual(called, [])
+
+
+class NewsRelevance(unittest.TestCase):
+    PRETEND = (
+        "[ebuild     U  ] sys-libs/glibc-2.40 [2.39]  0 KiB\n"
+        "[ebuild     U  ] app-editors/vim-9.1.0  0 KiB\n"
+        "Total: 2 packages, Size of downloads: 0 KiB\n"
+    )
+
+    def _handler(self, cmd):
+        if cmd[:2] == ["emerge", "--pretend"]:
+            return CommandResult(0, stdout=self.PRETEND)
+        return _happy_handler(cmd)
+
+    def test_plan_flags_unread_news_for_an_updated_package(self):
+        from gentoo_updater import advise
+        updater, _ = make_updater(self._handler)
+        updater._unread_news_items = lambda: [
+            advise.NewsItem("glibc 2.40 migration notes", ["sys-libs/glibc"])]
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+        self.assertIn("news item(s) apply", _phase(report, "plan").detail)
+
+    def test_plan_ignores_news_for_untouched_package(self):
+        from gentoo_updater import advise
+        updater, _ = make_updater(self._handler)
+        updater._unread_news_items = lambda: [
+            advise.NewsItem("openssh change", ["net-misc/openssh"])]
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+        self.assertNotIn("news item", _phase(report, "plan").detail)
 
 
 class AuditAndNotify(unittest.TestCase):

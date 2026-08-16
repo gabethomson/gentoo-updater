@@ -125,6 +125,66 @@ def parse_glsa_ids(text: str) -> list[str]:
     return ids
 
 
+# --- news correlation ---------------------------------------------------
+#
+# GLEP 42 news items carry headers at the top of the file, one of which --
+# `Display-If-Installed:` -- names a package atom the item is about. We parse
+# those and cross-reference them against the packages a run is about to touch,
+# so "there's unread news specifically about glibc, which you're upgrading"
+# surfaces at the plan step instead of being buried in `eselect news`.
+
+_NEWS_TITLE = re.compile(r"^Title:\s*(.+?)\s*$")
+_NEWS_IF_INSTALLED = re.compile(r"^Display-If-Installed:\s*(.+?)\s*$")
+
+
+@dataclass
+class NewsItem:
+    title: str
+    if_installed: list[str] = field(default_factory=list)  # cat/pkg names
+
+
+def news_atom_name(atom: str) -> str:
+    """Reduce a Display-If-Installed atom to its cat/pkg name, dropping version
+    operators, slot, repo, and trailing version (e.g. '>=sys-apps/portage-3.0'
+    -> 'sys-apps/portage')."""
+    a = atom.strip()
+    a = re.sub(r"^[<>=~!]+", "", a)     # version operators
+    a = a.split("::", 1)[0]             # ::repo
+    a = a.split(":", 1)[0]              # :slot
+    a = re.sub(r"-[0-9][^/]*$", "", a)  # -version on the last path segment
+    return a
+
+
+def parse_news_item(text: str) -> NewsItem:
+    """Extract the title and any Display-If-Installed package names from one
+    GLEP 42 news item. Headers live before the first blank line."""
+    title = ""
+    installed: list[str] = []
+    for line in text.splitlines():
+        if line.strip() == "":
+            break  # end of headers; the body follows
+        m = _NEWS_TITLE.match(line)
+        if m and not title:
+            title = m.group(1)
+            continue
+        m = _NEWS_IF_INSTALLED.match(line)
+        if m:
+            installed.append(news_atom_name(m.group(1)))
+    return NewsItem(title=title, if_installed=installed)
+
+
+def relevant_news(items, package_names) -> list[tuple[str, list[str]]]:
+    """Pair each news item with the subset of `package_names` it's about. Items
+    that match nothing are dropped. Returns [(title, [matched cat/pkg, ...])]."""
+    names = set(package_names)
+    out: list[tuple[str, list[str]]] = []
+    for it in items:
+        hits = sorted({p for p in it.if_installed if p in names})
+        if hits:
+            out.append((it.title, hits))
+    return out
+
+
 # --- depclean (orphan removal) ------------------------------------------
 
 # An unmerge-candidate line in `emerge --depclean -p` is a bare cat/pkg atom at
