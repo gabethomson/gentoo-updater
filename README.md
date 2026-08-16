@@ -1,9 +1,8 @@
 # gentoo-updater (`gup`)
 
-A wrapper around Gentoo world updates. It doesn't replace `emerge` — it runs the
-same commands you'd type by hand, in the right order, and adds the checks a bare
-update sequence skips: a snapshot first, risk flagging, news, and health checks
-after.
+A wrapper around Gentoo world updates. It runs the same commands you'd type by
+hand, in the right order, and adds the checks a bare update sequence skips: a
+snapshot first, risk flagging, news, and health checks after.
 
 Every command it runs is printed to the terminal, prefixed with `$`. Nothing is
 hidden.
