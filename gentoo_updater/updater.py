@@ -62,8 +62,9 @@ def _pkg_label(change) -> str:
     core = change.atom.split("::", 1)[0]
     prefix = change.name + "-"
     ver = core[len(prefix):] if core.startswith(prefix) else core
-    if change.old_version:
-        return f"{tag}  {change.name}  {change.old_version} → {ver}"
+    old = change.old_version.split("::", 1)[0]  # drop any ::repo suffix
+    if old:
+        return f"{tag}  {change.name}  {old} → {ver}"
     return f"{tag}  {change.name}  {ver}"
 
 
@@ -262,7 +263,11 @@ class Updater:
         # Run the picker. If anything was unchecked, re-pretend with --exclude
         # and return the new result. None = nothing changed, caller carries on.
         items = self._selectable_items(plan)
-        checked = self.selector(items)
+        # The picker (curses, or the plain prompt) must own the terminal, so
+        # drop the spinner while it's up -- otherwise the live line draws on top
+        # of it.
+        with ui.suspend():
+            checked = self.selector(items)
         if checked is None:
             ui.info("Selection cancelled -- keeping all packages.")
             return None
