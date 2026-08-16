@@ -48,16 +48,36 @@ emerge @module-rebuild
 
 ## Install
 
-```bash
-git clone https://github.com/kenny/gentoo-updater
-cd gentoo-updater
-pip install --user .
+It's pure stdlib, so it doesn't need `pip` — which is good, since Gentoo blocks
+`pip install` into the system Python (PEP 668). Pick whichever fits.
 
-# optional, for colour/tables/the live dashboard:
-pip install --user 'rich>=13'
+**Run it from the clone** (no install):
+
+```bash
+git clone https://github.com/gabethomson/gentoo-updater
+cd gentoo-updater
+python -m gentoo_updater --help
 ```
 
-Works without `rich` (plain text fallback). No other dependencies.
+**pipx** — gives you a `gup` command in its own venv:
+
+```bash
+emerge -av dev-python/pipx
+pipx install git+https://github.com/gabethomson/gentoo-updater
+pipx install 'gentoo-updater[pretty] @ git+https://github.com/gabethomson/gentoo-updater'  # with rich
+```
+
+**ebuild** — the Gentoo-native way, from the bundled overlay:
+
+```bash
+# add the overlay shipped in contrib/overlay, then:
+emerge -av app-admin/gentoo-updater
+```
+
+See [`contrib/overlay/`](contrib/overlay/) for the ebuild.
+
+The only optional dependency is `rich` (`dev-python/rich`) for colour, tables,
+and the live dashboard; without it the output is plain text.
 
 ## Usage
 

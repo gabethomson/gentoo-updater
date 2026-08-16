@@ -30,8 +30,8 @@ pretty = ["rich>=13.0"]
 gup = "gentoo_updater.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/kenny/gentoo-updater"
-Issues = "https://github.com/kenny/gentoo-updater/issues"
+Homepage = "https://github.com/gabethomson/gentoo-updater"
+Issues = "https://github.com/gabethomson/gentoo-updater/issues"
 
 [tool.setuptools.packages.find]
 include = ["gentoo_updater*"]

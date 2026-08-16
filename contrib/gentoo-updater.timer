@@ -1,6 +1,6 @@
 [Unit]
 Description=Run gentoo-updater on a schedule
-Documentation=https://github.com/kenny/gentoo-updater
+Documentation=https://github.com/gabethomson/gentoo-updater
 
 [Timer]
 OnCalendar=daily

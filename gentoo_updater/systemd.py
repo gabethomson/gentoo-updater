@@ -16,7 +16,7 @@ def service_unit(exec_path: str = "gup", extra_args: str = "-y --no-sudo") -> st
     return f"""\
 [Unit]
 Description=Gentoo world update (gentoo-updater)
-Documentation=https://github.com/kenny/gentoo-updater
+Documentation=https://github.com/gabethomson/gentoo-updater
 Wants=network-online.target
 After=network-online.target
 
@@ -34,7 +34,7 @@ def timer_unit(on_calendar: str = DEFAULT_SCHEDULE) -> str:
     return f"""\
 [Unit]
 Description=Run gentoo-updater on a schedule
-Documentation=https://github.com/kenny/gentoo-updater
+Documentation=https://github.com/gabethomson/gentoo-updater
 
 [Timer]
 OnCalendar={on_calendar}

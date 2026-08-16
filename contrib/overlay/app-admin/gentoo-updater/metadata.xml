@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE pkgmetadata SYSTEM "https://www.gentoo.org/dtd/metadata.dtd">
+<pkgmetadata>
+  <maintainer type="person">
+    <email>onlyusemycontroler@gmail.com</email>
+    <name>kenny</name>
+  </maintainer>
+  <use>
+    <flag name="rich">Use <pkg>dev-python/rich</pkg> for colour, tables, and the live dashboard</flag>
+  </use>
+  <upstream>
+    <remote-id type="github">gabethomson/gentoo-updater</remote-id>
+  </upstream>
+</pkgmetadata>
