@@ -1,13 +1,6 @@
-"""Thin wrapper around subprocess for running system commands.
-
-Three modes:
-  - capture():     run, collect stdout/stderr, return it (for parsing)
-  - stream():      run, let output go straight to the terminal (for long builds)
-  - interactive(): hand the terminal over entirely (for dispatch-conf etc.)
-
-A dry_run flag lets the whole tool be exercised without touching the system,
-which is invaluable for development and for a --dry-run user flag.
-"""
+"""Runs system commands. capture() collects output, stream() lets it hit the
+terminal, interactive() is stream() with a name that says "this grabs stdin".
+dry_run short-circuits anything that would change the system."""
 
 from __future__ import annotations
 
@@ -26,18 +19,14 @@ class CommandResult:
 
 
 def _c_locale_env() -> dict[str, str]:
-    """Environment for commands whose stdout we parse.
-
-    Portage/eselect/revdep-rebuild localise their output, so a box set to a
-    non-English locale would silently break our substring checks ("no broken",
-    "Total: 0 packages", ...). Pin LC_ALL=C and suppress colour so the parsers
-    see stable, ASCII output regardless of the user's environment.
-    """
+    # We grep portage/eselect output for strings like "no broken" and
+    # "Total: 0 packages". On a non-English box those are localised and the
+    # checks silently fail, so force C locale + no colour for parsed commands.
     env = dict(os.environ)
     env["LC_ALL"] = "C"
     env["LANG"] = "C"
-    env["NOCOLOR"] = "true"      # portage
-    env["NO_COLOR"] = "1"        # de-facto cross-tool standard
+    env["NOCOLOR"] = "true"
+    env["NO_COLOR"] = "1"
     return env
 
 
@@ -47,55 +36,40 @@ class CommandRunner:
         self.use_sudo = use_sudo
 
     def _prep(self, cmd: list[str]) -> list[str]:
-        # Read-only introspection commands don't need root; mutating ones do.
-        # We keep this simple: caller-provided commands that need root get sudo
-        # prepended unless we're already root. Commands that are always safe
-        # read-only (find, eselect news count, emerge -p) are marked via the
-        # _needs_root heuristic below.
         if self.use_sudo and self._needs_root(cmd):
             return ["sudo", *cmd]
         return cmd
 
     @staticmethod
     def _needs_root(cmd: list[str]) -> bool:
-        """Whether a command both needs root AND mutates the system.
-
-        This single predicate drives two things: prepending sudo, and the
-        --dry-run guard (a command that mutates is exactly one we must not run
-        in a dry run). It is deliberately subcommand-aware so that read-only
-        introspection -- `emerge --pretend`, `snapper list`, `find` -- is
-        neither sudo'd nor suppressed under --dry-run, while the mutating
-        siblings (`snapper create`, `btrfs subvolume snapshot`, `mkdir`) are.
-        """
+        # Does this command need root *and* change the system? Both questions
+        # have the same answer here, and one predicate answers both: whether to
+        # sudo, and whether dry_run should skip it. It has to look at
+        # subcommands, not just the program, so that read-only calls (emerge
+        # --pretend, snapper list, find) still run under --dry-run while their
+        # mutating siblings (snapper create, btrfs subvolume snapshot) don't.
         prog = cmd[0]
-        # emerge needs root unless it's a pretend/search invocation
         if prog == "emerge":
             readonly = {"-p", "--pretend", "-s", "--search", "-S", "--searchdesc"}
             return not any(a in readonly for a in cmd)
         if prog in ("emaint", "dispatch-conf", "revdep-rebuild", "eix-update",
                     "mkdir"):
             return True
-        # snapshot backends: only the state-changing subcommands mutate. Listing
-        # and config discovery must still run under --dry-run so `gup --dry-run`
-        # and `gup rollback` can see the real snapshot state.
         if prog == "snapper":
             return any(sub in cmd for sub in ("create", "rollback", "delete",
                                               "modify"))
         if prog == "btrfs":
             return "snapshot" in cmd or "delete" in cmd
-        # eselect news read/count and find/findmnt are safe as an unprivileged user
-        return False
+        return False  # eselect news, find, findmnt, ... fine as a normal user
 
     def capture(self, cmd: list[str]) -> CommandResult:
         full = self._prep(cmd)
         if self.dry_run and self._needs_root(cmd):
             ui.dim(f"[dry-run] would run: {' '.join(full)}")
-            return CommandResult(returncode=0, stdout="", stderr="")
+            return CommandResult(returncode=0)
         try:
-            proc = subprocess.run(
-                full, capture_output=True, text=True, check=False,
-                env=_c_locale_env(),
-            )
+            proc = subprocess.run(full, capture_output=True, text=True,
+                                  check=False, env=_c_locale_env())
             return CommandResult(proc.returncode, proc.stdout, proc.stderr)
         except FileNotFoundError as exc:
             return CommandResult(returncode=127, stderr=str(exc))
@@ -107,8 +81,8 @@ class CommandRunner:
             return CommandResult(returncode=0)
         ui.dim(f"$ {' '.join(full)}")
         try:
-            # Hand the terminal to the child: drop the live panel (if any) so its
-            # output isn't fighting a pinned dashboard, then restore it after.
+            # ui.suspend() drops the live dashboard so the child gets the
+            # terminal to itself, then puts it back.
             with ui.suspend():
                 proc = subprocess.run(full, check=False)
             return CommandResult(proc.returncode)
@@ -116,6 +90,4 @@ class CommandRunner:
             return CommandResult(returncode=127, stderr=str(exc))
 
     def interactive(self, cmd: list[str]) -> CommandResult:
-        """Same as stream in practice, but semantically flags that the command
-        takes over stdin (dispatch-conf, eselect news read)."""
         return self.stream(cmd)

@@ -1,14 +1,6 @@
-"""Interactive package picker for `gup --select`.
-
-At the plan step you can review the pending update as a checklist -- everything
-starts checked; uncheck what you don't want this run. The unchecked packages
-become `emerge --exclude` atoms (the updater re-pretends with them to show the
-real resulting plan).
-
-The selection *state* (`Selection`) is a plain, fully testable class. Two front
-ends drive it: a full-screen curses checkbox (arrow keys / space) and a simple
-numbered fallback for when curses isn't available. `pick()` chooses between them.
-"""
+"""The `--select` checklist. Selection holds the state (testable on its own);
+pick() drives it with either a curses checkbox or, when there's no tty, a plain
+numbered prompt."""
 
 from __future__ import annotations
 
@@ -18,8 +10,7 @@ from dataclasses import dataclass, field
 
 @dataclass
 class Selection:
-    """A checklist over named items, all checked initially."""
-
+    # Named items, all checked to start.
     names: list[str]
     labels: list[str]
     checked: list[bool] = field(default_factory=list)
@@ -57,9 +48,8 @@ class Selection:
 
 
 def pick(items: list[tuple[str, str]], *, backend: str | None = None):
-    """Present the checklist and return the list of *checked* names, or None if
-    the user cancelled. `items` is a list of (name, label). An empty list yields
-    an empty selection. `backend` forces "curses"/"plain" (mainly for tests)."""
+    # items are (name, label). Returns the checked names, or None if cancelled.
+    # backend forces "curses"/"plain" (tests use it).
     if not items:
         return []
     sel = Selection.from_items(items)
@@ -168,8 +158,8 @@ def _addstr(stdscr, y, x, text, attr=0) -> None:
 # -- plain numbered fallback --------------------------------------------
 
 def _plain_pick(sel: Selection, *, input_fn=None, out=print):
-    """One-shot fallback: list everything checked, ask which numbers to uncheck."""
-    input_fn = input_fn or input  # late-bind so callers can patch builtins.input
+    # One shot: print the list, ask which numbers to drop.
+    input_fn = input_fn or input  # late bind so tests can patch builtins.input
     out("Pending update -- all selected. Enter numbers to UNSELECT "
         "(space/comma separated), 'q' to cancel, or blank to keep all:")
     for i, label in enumerate(sel.labels, 1):

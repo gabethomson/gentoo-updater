@@ -1,6 +1,4 @@
 """Tests for the pure advisory/parsing helpers and the snapshot-list parsers.
-
-Run with:  python -m pytest   (or standalone: python tests/test_advise.py)
 """
 
 import os

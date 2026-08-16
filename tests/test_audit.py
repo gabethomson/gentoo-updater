@@ -1,6 +1,4 @@
 """Tests for the audit-record builder, JSONL renderer, and writer fallback.
-
-Run with:  python -m pytest   (or standalone: python tests/test_audit.py)
 """
 
 import json

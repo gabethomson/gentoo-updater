@@ -3,8 +3,6 @@
 These exercise the plain/non-tty path (dashboard inactive) plus the pure render
 so they run with or without a real terminal. Rendering assertions are guarded on
 rich being importable.
-
-Run with:  python -m pytest   (or standalone: python tests/test_ui.py)
 """
 
 import contextlib

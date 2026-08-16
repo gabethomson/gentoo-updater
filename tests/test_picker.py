@@ -2,8 +2,6 @@
 
 The curses front end needs a real terminal and isn't unit-tested; the logic it
 drives (Selection) and the numbered fallback are covered here.
-
-Run with:  python -m pytest   (or standalone: python tests/test_picker.py)
 """
 
 import os

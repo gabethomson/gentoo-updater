@@ -1,11 +1,5 @@
-"""Audit trail: one structured record per run, appended as JSON Lines.
-
-Keeping a machine-readable history of what gup did -- when, which phases passed,
-what got snapshotted, whether a reboot was advised -- makes it possible to answer
-"what changed on this box last Tuesday?" without spelunking emerge logs. The
-record builder is pure (report in, dict out) so it's trivially testable; the
-writer is a thin, defensive append.
-"""
+"""One JSON line per run, appended to a history file. build_record() is pure
+(report in, dict out); AuditLog just appends and never raises on a bad write."""
 
 from __future__ import annotations
 
@@ -25,7 +19,6 @@ def _user_path() -> str:
 
 def build_record(report, *, started: float, finished: float,
                  version: str, command: str = "update") -> dict:
-    """Turn an UpdateReport into a flat, JSON-serialisable audit record."""
     plan = report.plan
     return {
         "timestamp": _iso(finished),
@@ -48,7 +41,6 @@ def build_record(report, *, started: float, finished: float,
 
 
 def render_line(record: dict) -> str:
-    """One compact JSON object, newline-terminated (JSON Lines)."""
     return json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n"
 
 
@@ -57,15 +49,15 @@ def _iso(ts: float) -> str:
 
 
 class AuditLog:
-    """Append-only JSONL writer. Best-effort: a write failure is never allowed
-    to sink a run that otherwise succeeded -- it's a diary, not a transaction."""
+    # Append-only, best-effort. A failed write is a lost diary entry, not a
+    # failed run, so it never raises.
 
     def __init__(self, path: str = ""):
         self.path = path or SYSTEM_PATH
         self._fallback = _user_path()
 
     def record(self, entry: dict) -> str | None:
-        """Append one record. Returns the path written, or None on failure."""
+        # Returns the path written, or None if nothing was writable.
         line = render_line(entry)
         for candidate in (self.path, self._fallback):
             if self._append(candidate, line):

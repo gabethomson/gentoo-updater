@@ -1,19 +1,9 @@
-"""Optional configuration file support.
+"""Config file so you don't retype the same flags every run.
 
-A config file lets a user pin their preferred defaults (unattended mode, snapshot
-policy, notification and audit settings) so they don't have to pass the same
-flags every run -- handy for a systemd timer that runs `gup` with no arguments.
+Precedence, low to high: defaults -> /etc/gentoo-updater.toml ->
+~/.config/gentoo-updater/config.toml -> command-line flags.
 
-Precedence, lowest to highest:
-  1. built-in defaults (this dataclass)
-  2. /etc/gentoo-updater.toml           (system-wide)
-  3. ~/.config/gentoo-updater/config.toml   (per-user)
-  4. command-line flags
-
-Parsing is TOML via the stdlib `tomllib` (Python 3.11+). On older interpreters,
-or when no file exists, we silently fall back to the built-in defaults -- the
-config file is a convenience, never a requirement.
-"""
+TOML via stdlib tomllib (3.11+). No file or no tomllib just means defaults."""
 
 from __future__ import annotations
 
@@ -39,9 +29,7 @@ NOTIFY_CHOICES = ("never", "failure", "reboot", "always")
 
 @dataclass
 class Config:
-    """Effective settings for a run. Field names match CLI concepts so the two
-    can be merged mechanically."""
-
+    # Field names match the CLI flags so the two merge by name.
     # behaviour
     yes: bool = False
     non_interactive: bool = False
@@ -64,11 +52,7 @@ class Config:
     audit_path: str = ""             # empty -> AuditLog picks a default
 
     def merged_with_cli(self, cli: dict) -> "Config":
-        """Return a copy overridden by any CLI values that were explicitly set.
-
-        `cli` maps field names to values, where None means 'not given on the
-        command line' and should leave the config value untouched.
-        """
+        # cli maps field name -> value; None means "not passed", so keep ours.
         values = {f.name: getattr(self, f.name) for f in fields(self)}
         for key, val in cli.items():
             if val is not None and key in values:
@@ -77,9 +61,8 @@ class Config:
 
 
 def _coerce(raw: dict) -> dict:
-    """Keep only recognised keys and coerce them to the field types. Unknown
-    keys are ignored rather than fatal, so a newer config on an older tool (or a
-    typo) degrades instead of crashing."""
+    # Keep known keys, coerce to the right type, ignore the rest (typos, keys
+    # from a newer version) instead of blowing up.
     known = {f.name: f.type for f in fields(Config)}
     out: dict = {}
     for key, val in raw.items():
@@ -101,8 +84,7 @@ def _coerce(raw: dict) -> dict:
 
 
 def parse_config_text(text: str) -> dict:
-    """Parse TOML config text into a coerced dict of known settings. Tolerant:
-    a syntax error or missing tomllib yields an empty dict (defaults win)."""
+    # Bad TOML (or no tomllib) -> empty dict, and defaults win.
     if tomllib is None:
         return {}
     try:
@@ -117,8 +99,7 @@ def parse_config_text(text: str) -> dict:
 
 
 def load_config(paths: list[str] | None = None) -> Config:
-    """Load and layer config files (later paths override earlier). Missing or
-    unreadable files are skipped."""
+    # Layer the files, later ones winning; skip any we can't read.
     if paths is None:
         paths = [SYSTEM_PATH, _user_path()]
     merged: dict = {}

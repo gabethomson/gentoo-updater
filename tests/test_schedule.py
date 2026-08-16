@@ -1,6 +1,4 @@
 """Tests for init detection and the per-init scheduling backends.
-
-Run with:  python -m pytest   (or standalone: python tests/test_schedule.py)
 """
 
 import os

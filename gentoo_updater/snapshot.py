@@ -1,10 +1,5 @@
-"""Pre-update snapshot handling.
-
-Prefers snapper (if a 'root' config exists) because it integrates with the
-rest of the snapper tooling the user may already rely on. Falls back to raw
-`btrfs subvolume snapshot` if snapper isn't configured but the root is btrfs.
-If neither applies, snapshots are simply unavailable and the updater skips them.
-"""
+"""Pre-update snapshots. Uses snapper if there's a 'root' config, else a raw
+btrfs snapshot if / is btrfs, else nothing (and the updater skips the step)."""
 
 from __future__ import annotations
 
@@ -15,8 +10,7 @@ from dataclasses import dataclass
 
 from .runner import CommandRunner
 
-# Description we stamp on snapshots we create, so `gup rollback` can tell ours
-# apart from snapshots made by other tooling.
+# Stamped on snapshots we make so rollback can tell ours from other tools'.
 SNAPSHOT_TAG = "gentoo-updater"
 
 
@@ -53,10 +47,7 @@ class SnapshotManager:
         return None
 
     def create(self, description: str) -> str:
-        """Create a pre-update snapshot, returning an identifier string.
-
-        Raises on failure so the caller can decide whether to proceed.
-        """
+        # Returns an id string; raises on failure so the caller can decide.
         if self._backend == "snapper":
             return self._create_snapper(description)
         if self._backend == "btrfs":
@@ -66,7 +57,7 @@ class SnapshotManager:
     # -- listing / rollback ---------------------------------------------
 
     def list_snapshots(self) -> list[SnapshotInfo]:
-        """Pre-update snapshots this tool created, newest last."""
+        # Only the snapshots we made, newest last.
         if self._backend == "snapper":
             res = self.run.capture([
                 "snapper", "-c", "root", "list",
@@ -82,12 +73,9 @@ class SnapshotManager:
         return []
 
     def rollback(self, ident: str) -> str:
-        """Roll the system back to a snapshot.
-
-        snapper: performs a real `snapper rollback` (takes effect on reboot).
-        btrfs: raises with manual instructions -- automating a raw subvolume
-        swap can leave an unbootable system, so we refuse to guess.
-        """
+        # snapper does a real rollback. For raw btrfs we refuse to swap
+        # subvolumes automatically (easy way to end up unbootable) and print
+        # the manual steps instead.
         if self._backend == "snapper":
             num = ident.split("#", 1)[-1]
             res = self.run.capture(["snapper", "-c", "root", "rollback", num])
@@ -119,13 +107,10 @@ class SnapshotManager:
         return f"snapper#{num}"
 
     def _create_btrfs(self, description: str) -> str:
-        # A conservative, self-contained scheme: read-only snapshot of the root
-        # subvolume into /.snapshots/<timestamp>. This assumes a subvolume
-        # layout where / is a btrfs subvolume and /.snapshots exists or can be
-        # created. We keep it read-only so it's a pure restore point.
+        # Read-only snapshot of / into /.snapshots/<timestamp>. Read-only so
+        # it's a clean restore point.
         stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         dest = f"/.snapshots/gentoo-updater-{stamp}"
-        # ensure /.snapshots exists
         self.run.capture(["mkdir", "-p", "/.snapshots"])
         res = self.run.capture(["btrfs", "subvolume", "snapshot", "-r", "/", dest])
         if res.returncode != 0:
@@ -148,8 +133,7 @@ def _root_is_btrfs(runner: CommandRunner) -> bool:
 
 
 def parse_snapper_list(text: str, *, tag: str) -> list[SnapshotInfo]:
-    """Parse `snapper list --columns number,date,description` output, keeping
-    only rows whose description carries our tag."""
+    # `snapper list --columns number,date,description`, tagged rows only.
     out: list[SnapshotInfo] = []
     for line in text.splitlines():
         if "|" not in line:
@@ -170,8 +154,7 @@ def parse_snapper_list(text: str, *, tag: str) -> list[SnapshotInfo]:
 
 
 def parse_btrfs_snapshots(find_output: str) -> list[SnapshotInfo]:
-    """Turn `find /.snapshots -name gentoo-updater-*` output into snapshot info,
-    reading the timestamp out of the directory name (gentoo-updater-YYYYmmdd-HHMMSS)."""
+    # Timestamp comes straight out of the dir name (gentoo-updater-YYYYmmdd-HHMMSS).
     out: list[SnapshotInfo] = []
     for path in find_output.splitlines():
         path = path.strip()

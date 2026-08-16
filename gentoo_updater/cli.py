@@ -1,18 +1,5 @@
-"""Command-line interface.
-
-Subcommands:
-  update         run the full pipeline (default)
-  plan           dry-run: sync-free, just show what would be updated
-  verify         run only the post-update health checks
-  news           show/read pending news
-  rollback       restore a pre-update snapshot
-  depclean       remove orphaned packages (opt-in, pretends first)
-  install-schedule  set up unattended runs for your init (systemd/openrc/runit)
-  install-timer  shortcut for 'install-schedule --init systemd'
-
-Global flags let you pick interactive vs unattended and toggle safety steps.
-Defaults can also be set in a config file (see config.py); explicit flags win.
-"""
+"""Argument parsing and command dispatch. Flags override the config file; see
+config.py for the layering."""
 
 from __future__ import annotations
 
@@ -34,11 +21,11 @@ from . import ui
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gup",
-        description="A safer, structured Gentoo world-update tool.",
+        description="Wraps emerge world updates with snapshots, checks, and rollback.",
     )
 
-    # Behaviour flags default to None so we can tell "unset" (use config) from
-    # "explicitly passed" (override config). store_true would force False.
+    # default=None on the toggles so we can tell "not passed" (use config) from
+    # "passed" (override it). Plain store_true would force False.
     mode = p.add_argument_group("mode")
     mode.add_argument(
         "-y", "--yes", action="store_true", default=None,
@@ -102,7 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _effective_config(args):
-    """Layer the config file(s) under the explicitly-passed CLI flags."""
     paths = [args.config] if args.config else None
     cfg = load_config(paths)
     overrides = {
@@ -146,9 +132,7 @@ def _print_plan_files(plan_obj) -> None:
 
 
 def _install_schedule(args, *, backend: str | None = None) -> int:
-    """Set up a scheduled unattended run for the target init. `backend` forces a
-    specific one (install-timer -> systemd); otherwise we resolve it from
-    --init, auto-detecting when asked."""
+    # backend forces one (install-timer -> systemd); else resolve from --init.
     exec_path = shutil.which("gup") or "gup"
     if backend is None:
         init = args.init

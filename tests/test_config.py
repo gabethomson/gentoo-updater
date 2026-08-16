@@ -1,6 +1,4 @@
 """Tests for config-file parsing and the CLI-override merge.
-
-Run with:  python -m pytest   (or standalone: python tests/test_config.py)
 """
 
 import os

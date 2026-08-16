@@ -3,8 +3,6 @@
 These are the risky, stateful parts of the tool -- the phase pipeline and the
 "never mutate under --dry-run" promise -- so we pin their behaviour with fakes
 rather than touching a real system.
-
-Run with:  python -m pytest   (or standalone: python tests/test_updater.py)
 """
 
 import io

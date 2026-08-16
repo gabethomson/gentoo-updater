@@ -1,10 +1,6 @@
-"""Parse `emerge --pretend --verbose` output into structured data.
-
-emerge's pretend output lists one package per line with a tag in brackets and
-flags/metadata after. We extract enough to categorize the update and flag risk.
-We deliberately keep this tolerant: emerge output format varies across versions
-and configs, so we parse what we can and never hard-fail on an odd line.
-"""
+"""Parse `emerge --pretend -v` output into structured data. It's tolerant on
+purpose: emerge's format shifts between versions, so odd lines are skipped, not
+fatal."""
 
 from __future__ import annotations
 
@@ -41,7 +37,7 @@ class PkgChange:
     is_new: bool
     is_upgrade: bool
     is_rebuild: bool
-    needs_keyword: bool  # the '~' marker -- testing keyword required
+    needs_keyword: bool  # the '~' marker: testing keyword required
     from_binary: bool
     old_version: str = ""  # installed version being replaced (upgrades only)
 
@@ -94,9 +90,7 @@ def parse_pretend(text: str, *, high_risk_atoms: tuple[str, ...] = ()) -> Preten
     for line in text.splitlines():
         m = _LINE.match(line.strip())
         if not m:
-            # capture the download total when we see it. The summary line looks
-            # like: "Total: N packages (...), Size of downloads: 4,529 KiB"
-            # so split specifically on the "Size of downloads:" label.
+            # grab the download total off the "Total: ... Size of downloads:" line
             if "Size of downloads" in line:
                 plan.download_size = line.split("Size of downloads:", 1)[-1].strip()
             continue

@@ -1,9 +1,6 @@
-"""Terminal output helpers.
-
-Uses `rich` when available for colour and tables, but degrades gracefully to
-plain print() so the tool works on a minimal box with no extra deps. All
-user-facing output goes through here so the styling is consistent and testable.
-"""
+"""All terminal output goes through here. Uses rich for colour/tables/the live
+panel when it's installed, otherwise plain print(). Keeping it in one place means
+the fallback is consistent and there's one thing to test."""
 
 from __future__ import annotations
 
@@ -26,20 +23,16 @@ except Exception:  # noqa: BLE001 - rich is optional
     _HAVE_RICH = False
 
 
-# -- live dashboard state ------------------------------------------------
-#
-# When rich is present and we're on a real terminal, run_all drives a pinned
-# "live" panel showing the phase checklist. It's module-level state (rather than
-# an object) because both the updater and the runner talk to ui, and the runner
-# needs `suspend()` to step the panel aside while a subprocess streams.
-_PLAIN = False              # user forced plain output (--plain)
+# Live-panel state. Module-level (not an object) because both the updater and
+# the runner talk to ui, and the runner needs suspend() to step the panel aside
+# while a subprocess owns the terminal.
+_PLAIN = False              # --plain
 _live: "Live | None" = None
 _phases: list[dict] = []    # [{"name", "status", "detail"}]
 _run_start: float = 0.0
 
 
 def set_plain(plain: bool) -> None:
-    """Force plain (non-dashboard) output regardless of terminal/rich."""
     global _PLAIN
     _PLAIN = plain
 
@@ -90,8 +83,7 @@ def hint(msg: str) -> None:
 
 
 def phase_header(name: str) -> None:
-    # The live dashboard already shows which phase is running, so the rule would
-    # just be noise -- skip it while the panel is up.
+    # The panel already shows the current phase, so skip the rule when it's up.
     if _live is not None:
         return
     label = f" {name.upper()} "
@@ -125,7 +117,6 @@ def confirm(prompt: str, *, default: bool = False) -> bool:
 # -- structured views ----------------------------------------------------
 
 def show_plan(plan) -> None:
-    """Render a parsed PretendPlan."""
     if plan.total == 0:
         info("[green]System is up to date -- nothing to do.[/green]"
              if _HAVE_RICH else "System is up to date -- nothing to do.")
@@ -158,7 +149,6 @@ def show_plan(plan) -> None:
 
 
 def show_autounmask(suggestion) -> None:
-    """Show emerge's suggested keyword/USE/mask/license changes and where they go."""
     warn("The update needs configuration changes before it can proceed.")
     info("Add the following to /etc/portage (review each line before applying):"
          if not _HAVE_RICH else
@@ -178,7 +168,6 @@ def show_autounmask(suggestion) -> None:
 
 
 def show_snapshots(snaps) -> None:
-    """List pre-update snapshots available to roll back to."""
     if _HAVE_RICH:
         table = Table(title="Pre-update snapshots", header_style="bold")
         table.add_column("#", justify="right")
@@ -195,7 +184,7 @@ def show_snapshots(snaps) -> None:
 
 
 def select_snapshot(snaps):
-    """Prompt for a snapshot by index; return the chosen one or None to cancel."""
+    # Pick by number; blank/invalid cancels.
     prompt = f"Snapshot to roll back to [1-{len(snaps)}, or blank to cancel]: "
     try:
         raw = input(prompt).strip()
@@ -215,7 +204,6 @@ def select_snapshot(snaps):
 
 
 def show_summary(report) -> None:
-    """End-of-run summary of every phase."""
     if _HAVE_RICH:
         table = Table(title="Run summary", header_style="bold")
         table.add_column("Phase")
@@ -270,7 +258,6 @@ def _fmt(seconds: float) -> str:
 
 
 def _render_dashboard():
-    """Build the pinned panel from current phase state (rich only)."""
     grid = Table.grid(padding=(0, 1))
     grid.add_column(width=2, justify="center")
     grid.add_column(no_wrap=True)
@@ -291,15 +278,15 @@ def _render_dashboard():
 
 
 def _new_live() -> "Live":
-    # transient so that stepping aside (suspend) cleanly erases the panel, and so
-    # the final summary -- not a frozen checklist -- is what stays on screen.
+    # transient=True so suspend() erases the panel cleanly and the final summary,
+    # not a frozen checklist, is what's left on screen.
     return Live(get_renderable=_render_dashboard, console=_console,
                 refresh_per_second=12, transient=True,
                 vertical_overflow="visible")
 
 
 def begin_run(phase_names: list[str]) -> None:
-    """Start the live dashboard for a pipeline run (no-op in plain mode)."""
+    # Start the panel (no-op in plain/non-tty mode; state is still tracked).
     global _live, _phases, _run_start
     _phases = [{"name": n, "status": "pending", "detail": ""} for n in phase_names]
     _run_start = time.time()
@@ -334,8 +321,8 @@ def phase_done(result) -> None:
 
 @contextlib.contextmanager
 def suspend():
-    """Temporarily tear down the live panel so a subprocess (or prompt) can own
-    the terminal, then bring it back. A no-op when the dashboard isn't active."""
+    # Drop the panel so a subprocess/prompt gets the terminal, then bring it
+    # back. No-op when there's no panel.
     global _live
     if _live is None:
         yield
@@ -352,7 +339,7 @@ def suspend():
 
 
 def end_run(report) -> None:
-    """Stop the dashboard and print the persistent end-of-run summary."""
+    # Stop the panel, print the summary that stays on screen.
     global _live, _phases
     if _live is not None:
         _live.stop()

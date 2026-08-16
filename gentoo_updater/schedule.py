@@ -1,19 +1,11 @@
-"""Init-agnostic scheduling of unattended `gup` runs.
+"""Sets up scheduled runs per init. Only OpenRC and runit differ from systemd,
+and neither has a timer of its own, so:
 
-systemd, OpenRC, and runit schedule periodic work very differently -- and OpenRC
-and runit don't schedule it at all in the base system, they supervise daemons.
-So we support three backends:
+  systemd -> .service + .timer
+  cron    -> /etc/cron.<period>/gentoo-updater  (also what OpenRC uses)
+  runit   -> /etc/sv/gentoo-updater/run, a run-then-sleep loop
 
-  * systemd -> a .service + .timer (see systemd.py)
-  * cron    -> an /etc/cron.<period>/gentoo-updater script (the OpenRC-native
-               path on Gentoo: OpenRC just supervises the cron daemon)
-  * runit   -> an /etc/sv/gentoo-updater service whose run script loops the
-               update then sleeps (the runit idiom for periodic work)
-
-Rendering is pure text (testable); installing is a thin, explicit file write.
-Which backend fits which init is resolved by `backend_for_init`, and the running
-init is sniffed by `detect_init`.
-"""
+Rendering is text; install() writes the files."""
 
 from __future__ import annotations
 
@@ -47,8 +39,7 @@ RUNIT_DIR = "/etc/sv/gentoo-updater"
 
 
 def detect_init(*, comm_path: str = "/proc/1/comm", which=shutil.which) -> str | None:
-    """Best-effort sniff of the running init system. Returns one of the INIT_*
-    constants or None if we can't tell."""
+    # Sniff pid 1 and the PATH. INIT_* or None if we can't tell.
     comm = ""
     try:
         with open(comm_path, "r", encoding="utf-8") as fh:
@@ -65,8 +56,6 @@ def detect_init(*, comm_path: str = "/proc/1/comm", which=shutil.which) -> str |
 
 
 def backend_for_init(init: str) -> str:
-    """Map an init system to the scheduling backend that fits it. OpenRC has no
-    timer of its own, so it uses cron."""
     if init == INIT_SYSTEMD:
         return BACKEND_SYSTEMD
     if init == INIT_RUNIT:
@@ -78,9 +67,7 @@ def backend_for_init(init: str) -> str:
 
 @dataclass
 class SchedulePlan:
-    """A rendered, ready-to-install schedule: files to write (with which need
-    the executable bit) plus the commands to activate it."""
-
+    # Files to write, which of them need +x, and how to turn it on.
     backend: str
     files: dict[str, str] = field(default_factory=dict)
     executable: set[str] = field(default_factory=set)
@@ -112,7 +99,7 @@ def runit_run_script(exec_path: str = "gup", args: str = DEFAULT_ARGS,
 
 def plan(backend: str, *, exec_path: str = "gup", args: str = DEFAULT_ARGS,
          period: str = DEFAULT_PERIOD) -> SchedulePlan:
-    """Render the files + activation steps for a backend, without touching disk."""
+    # Render files + activation steps; no disk writes here.
     if backend == BACKEND_SYSTEMD:
         files = {
             os.path.join(systemd.DEFAULT_DEST, name): text
@@ -152,9 +139,8 @@ def plan(backend: str, *, exec_path: str = "gup", args: str = DEFAULT_ARGS,
 
 
 def install(plan_obj: SchedulePlan) -> list[str]:
-    """Write a plan's files (creating parent dirs, setting the exec bit where
-    asked). Raises OSError -- typically PermissionError when not root -- so the
-    caller can fall back to printing the files."""
+    # Write the files (+x where asked). Raises OSError (PermissionError when not
+    # root); the caller prints them instead.
     written: list[str] = []
     for path, text in plan_obj.files.items():
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

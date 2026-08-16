@@ -1,11 +1,5 @@
-"""Generate (and optionally install) a systemd service + timer for unattended runs.
-
-Rather than ask the user to hand-write unit files, `gup install-timer` renders
-them from the installed `gup` path and drops them in /etc/systemd/system. The
-service runs the pipeline unattended; because a system unit already runs as root,
-it passes --no-sudo. The rendering is pure text so it's testable without touching
-the filesystem.
-"""
+"""Renders the systemd service + timer for unattended runs. Text only, so it's
+easy to test. The service runs as root already, hence --no-sudo."""
 
 from __future__ import annotations
 
@@ -14,9 +8,7 @@ import os
 SERVICE_NAME = "gentoo-updater.service"
 TIMER_NAME = "gentoo-updater.timer"
 DEFAULT_DEST = "/etc/systemd/system"
-# systemd OnCalendar expression; `daily` == 00:00, and Persistent catches up a
-# run missed while the machine was off.
-DEFAULT_SCHEDULE = "daily"
+DEFAULT_SCHEDULE = "daily"  # OnCalendar value; Persistent catches up missed runs
 
 
 def service_unit(exec_path: str = "gup", extra_args: str = "-y --no-sudo") -> str:
@@ -56,7 +48,6 @@ WantedBy=timers.target
 
 def unit_files(exec_path: str = "gup", extra_args: str = "-y --no-sudo",
                on_calendar: str = DEFAULT_SCHEDULE) -> dict[str, str]:
-    """Map of {filename: contents} for the service and timer."""
     return {
         SERVICE_NAME: service_unit(exec_path, extra_args),
         TIMER_NAME: timer_unit(on_calendar),
@@ -64,11 +55,7 @@ def unit_files(exec_path: str = "gup", extra_args: str = "-y --no-sudo",
 
 
 def install_units(files: dict[str, str], dest: str = DEFAULT_DEST) -> list[str]:
-    """Write unit files into `dest`, returning the paths written.
-
-    Raises OSError (e.g. PermissionError when not root) so the caller can fall
-    back to printing the units and manual instructions.
-    """
+    # Raises OSError (PermissionError when not root); caller falls back to printing.
     written: list[str] = []
     os.makedirs(dest, exist_ok=True)
     for name, text in files.items():

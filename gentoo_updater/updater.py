@@ -1,9 +1,5 @@
-"""Core update orchestration for a Gentoo system.
-
-Each step is a discrete, named phase so it can be run, skipped, or reported on
-individually. The updater shells out to portage tools -- it never tries to do
-their work itself, only to wrap them with safety, parsing, and verification.
-"""
+"""The update pipeline. Each step is a named phase you can run, skip, or report
+on its own. It drives portage's own tools; it never reimplements them."""
 
 from __future__ import annotations
 
@@ -23,31 +19,26 @@ from . import audit as _audit
 from . import picker
 from . import ui
 
-# Where portage writes per-package elog messages (elog:save module). We surface
-# new ones after a run so post-merge instructions don't get lost in the scroll.
+# portage's per-package elog messages; we surface new ones after a run.
 ELOG_DIR = "/var/log/portage/elog"
 
-# Free space below this (in GiB) in the portage build dir gets a warning before
-# a source build -- big toolchain compiles can need several GiB of scratch.
+# Warn below this much free space in the build dir (toolchain builds are hungry).
 LOW_SPACE_GIB = 5.0
 
-# Where Portage records unread news (per repo) and where the news items live.
-# Split out as module constants so tests can point them at a fixture tree.
+# Unread-news state and the news items themselves. Module constants so tests can
+# point them at a fixture tree.
 NEWS_UNREAD_GLOB = "/var/lib/gentoo/news/news-*.unread"
 NEWS_REPOS_GLOB = "/var/db/repos/*/metadata/news"
 
 
 class Risk(Enum):
-    """How dangerous a pending change is judged to be."""
-
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
 
-# Packages whose upgrade warrants extra caution -- toolchain, init, kernel,
-# core libraries. An update touching these is more likely to need a reboot or
-# to break things subtly, so we surface them prominently.
+# Toolchain, init, kernel, core libs. Upgrades here are the ones most likely to
+# need a reboot or break something subtly, so we call them out.
 HIGH_RISK_ATOMS = (
     "sys-devel/gcc",
     "sys-libs/glibc",
@@ -62,7 +53,7 @@ HIGH_RISK_ATOMS = (
 
 
 def _pkg_label(change) -> str:
-    """One-line checklist label for a pending package: 'U cat/pkg  old → new'."""
+    # Checklist row: "U cat/pkg  old → new".
     tag = ("N" if change.is_new else "U" if change.is_upgrade
            else "R" if change.is_rebuild else " ")
     core = change.atom.split("::", 1)[0]
@@ -83,8 +74,6 @@ class PhaseResult:
 
 @dataclass
 class UpdateReport:
-    """Accumulated outcome of a full run, for the end-of-run summary."""
-
     phases: list[PhaseResult] = field(default_factory=list)
     plan: PretendPlan | None = None
     snapshot_id: str | None = None
@@ -119,25 +108,18 @@ class Updater:
         self.assume_yes = assume_yes
         self.low_space_gib = low_space_gib
         self.include_depclean = include_depclean
-        # Interactive package selection (`--select`): pick which pending packages
-        # to update; the rest become `emerge --exclude` atoms. `selector` is
-        # injectable for tests; it takes [(name, label)] and returns the checked
-        # names (or None to cancel).
+        # --select: pick packages to update, the rest go to emerge --exclude.
+        # selector is injectable for tests: [(name, label)] -> checked names/None.
         self.select = select
         self.selector = selector or picker.pick
         self._excludes: list[str] = []
-        # Optional side-channels: an audit-log writer and a notifier. Injected so
-        # tests can supply fakes (or None to disable). See audit.py / notify.py.
+        # Optional, injectable, both default off. See audit.py / notify.py.
         self.audit_log = audit_log
         self.notifier = notifier
         self.report = UpdateReport()
-        # Wall-clock start, used to find elog files written during this run.
-        self._started = time.time()
-
-    # -- decision helper -------------------------------------------------
+        self._started = time.time()  # to find elog files written during this run
 
     def _confirm(self, prompt: str, *, default: bool = False) -> bool:
-        """Ask the user, unless we're running unattended."""
         if self.assume_yes:
             return True
         if not self.interactive:
@@ -147,14 +129,13 @@ class Updater:
     # -- phases ----------------------------------------------------------
 
     def phase_preflight(self) -> PhaseResult:
-        """Sanity checks before touching anything."""
         missing = [t for t in ("emerge", "emaint") if shutil.which(t) is None]
         if missing:
             return PhaseResult(
                 "preflight", ok=False,
                 detail=f"missing required tools: {', '.join(missing)}",
             )
-        # eix / gentoolkit are optional but nice; note their absence.
+        # nice-to-haves; just note whether they're around
         optional = {t: shutil.which(t) is not None
                     for t in ("eix", "revdep-rebuild", "eselect", "glsa-check")}
         note = ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in optional.items())
@@ -171,7 +152,6 @@ class Updater:
 
     @staticmethod
     def _portage_build_dir() -> str:
-        """Where portage unpacks/builds. Honour PORTAGE_TMPDIR, else the default."""
         base = os.environ.get("PORTAGE_TMPDIR", "/var/tmp")
         candidate = os.path.join(base, "portage")
         return candidate if os.path.isdir(candidate) else base
@@ -185,9 +165,8 @@ class Updater:
         return usage.free / (1024 ** 3)
 
     def phase_news(self) -> PhaseResult:
-        """Check for unread Gentoo news. Unread news can carry
-        'do X before updating' warnings, so we surface it and, in
-        interactive mode, let the user bail to read it first."""
+        # Unread news can carry "do X before updating"; surface it and let an
+        # interactive user stop to read it.
         if shutil.which("eselect") is None:
             return PhaseResult("news", ok=True, skipped=True,
                                detail="eselect not present")
@@ -210,18 +189,15 @@ class Updater:
         return PhaseResult("news", ok=True, detail=f"{n} unread (acknowledged)")
 
     def phase_sync(self) -> PhaseResult:
-        """Sync all repos. A failure of the *main* tree is fatal; a failed
-        overlay is a warning (you can usually still update)."""
         res = self.run.stream(["emaint", "sync", "-a"])
         if res.returncode != 0:
-            # emaint returns nonzero if ANY repo failed. We can't easily tell
-            # which from the exit code alone, so we warn and let the user judge.
+            # emaint returns nonzero if any repo failed, and doesn't say which,
+            # so warn and let the user decide.
             ui.warn("At least one repository failed to sync.")
             if not self._confirm("Continue despite sync failure?", default=False):
                 return PhaseResult("sync", ok=False, detail="sync failed, user aborted")
             return PhaseResult("sync", ok=True,
                                detail="sync had failures (continued by choice)")
-        # refresh eix cache if present
         if shutil.which("eix-update"):
             self.run.stream(["eix-update"])
         return PhaseResult("sync", ok=True, detail="all repos synced")
@@ -231,21 +207,17 @@ class Updater:
         cmd = ["emerge", "--pretend", "--verbose", "--update",
                "--deep", "--newuse", "--with-bdeps=y", "@world"]
         if excludes:
-            # --exclude takes one space-separated list of cat/pkg atoms.
-            cmd += ["--exclude", " ".join(excludes)]
+            cmd += ["--exclude", " ".join(excludes)]  # one space-separated list
         return cmd
 
     def phase_plan(self) -> PhaseResult:
-        """Dry-run the world update and parse what it intends to do."""
         res = self.run.capture(self._pretend_cmd())
-        # emerge --pretend returns 0 normally; nonzero can mean blockers or
-        # unsatisfied deps that need config changes first.
         plan = parse_pretend(res.stdout, high_risk_atoms=HIGH_RISK_ATOMS)
         self.report.plan = plan
 
         if res.returncode != 0:
+            # nonzero usually means blockers or needed keyword/USE changes
             ui.error("emerge could not resolve the update cleanly.")
-            # emerge prints its autounmask suggestions to stderr; combine both.
             suggestion = advise.parse_autounmask(res.stdout + "\n" + res.stderr)
             if suggestion.any:
                 ui.show_autounmask(suggestion)
@@ -263,18 +235,17 @@ class Updater:
         if plan.total == 0:
             return PhaseResult("plan", ok=True, detail="nothing to update")
 
-        # Optional interactive cherry-pick: uncheck packages to skip this run.
         if self.select and self.interactive:
             selected = self._apply_selection(plan)
             if selected is not None:
-                return selected  # selection re-planned; use its result
+                return selected  # picker re-planned; use that result
 
         news_hits = self._plan_advisories(plan)
         return PhaseResult("plan", ok=True,
                            detail=self._plan_detail(plan.total, news_hits))
 
     def _selectable_items(self, plan: PretendPlan) -> list[tuple[str, str]]:
-        """(name, label) rows for the picker, one per distinct package."""
+        # One (name, label) row per distinct package.
         items: list[tuple[str, str]] = []
         seen: set[str] = set()
         for c in plan.changes:
@@ -285,9 +256,8 @@ class Updater:
         return items
 
     def _apply_selection(self, plan: PretendPlan) -> PhaseResult | None:
-        """Run the picker; if anything was unchecked, re-pretend with --exclude
-        and return the new plan result. Returns None when the selection is a
-        no-op (kept all, or cancelled) so the caller proceeds normally."""
+        # Run the picker. If anything was unchecked, re-pretend with --exclude
+        # and return the new result. None = nothing changed, caller carries on.
         items = self._selectable_items(plan)
         checked = self.selector(items)
         if checked is None:
@@ -296,7 +266,7 @@ class Updater:
         checked_set = set(checked)
         excludes = [name for name, _ in items if name not in checked_set]
         if not excludes:
-            return None  # nothing unchecked
+            return None
 
         self._excludes = excludes
         ui.info(f"Excluding {len(excludes)} package(s): " + ", ".join(excludes))
@@ -333,15 +303,13 @@ class Updater:
     def _plan_advisories(self, plan: PretendPlan, *,
                          risk_prefix: str = "This update touches high-risk "
                                             "packages: ") -> int:
-        """Post-plan warnings: high-risk packages, and unread news that concerns
-        packages in this update. Returns the number of relevant news items."""
+        # High-risk warning + relevant-news warning. Returns the news count.
         if plan.high_risk:
             ui.warn(risk_prefix + ", ".join(sorted(plan.high_risk)))
         return self._warn_relevant_news(plan)
 
     def _warn_relevant_news(self, plan: PretendPlan) -> int:
-        """Flag unread news items whose Display-If-Installed package is in the
-        pending update -- the news you most want to read before applying."""
+        # Unread news whose Display-If-Installed package is in this update.
         names = {c.name for c in plan.changes}
         if not names:
             return 0
@@ -354,8 +322,7 @@ class Updater:
         return len(matches)
 
     def _unread_news_items(self) -> list:
-        """Parse the unread news items Portage tracks. Best-effort: any I/O
-        problem yields an empty list rather than derailing the plan phase."""
+        # Best-effort read of the unread items; any I/O trouble -> empty list.
         ids: set[str] = set()
         for state in glob.glob(NEWS_UNREAD_GLOB):
             try:
@@ -372,8 +339,7 @@ class Updater:
 
     @staticmethod
     def _read_news_file(news_id: str) -> str:
-        """Read a news item's body from whichever repo carries it, preferring
-        the English text."""
+        # Find the item in whatever repo has it; prefer the English text.
         for base in glob.glob(NEWS_REPOS_GLOB):
             item_dir = os.path.join(base, news_id)
             candidates = (sorted(glob.glob(os.path.join(item_dir, "*.en.txt")))
@@ -387,9 +353,7 @@ class Updater:
         return ""
 
     def phase_glsa(self) -> PhaseResult:
-        """Check for known security advisories (GLSAs) affecting the system.
-        Informational: a vulnerable package is worth knowing about but never
-        blocks the update itself."""
+        # Known security advisories. Informational; never blocks the update.
         if shutil.which("glsa-check") is None:
             return PhaseResult("glsa", ok=True, skipped=True,
                                detail="glsa-check not present (install gentoolkit)")
@@ -405,8 +369,7 @@ class Updater:
         return PhaseResult("glsa", ok=True, detail="no known vulnerabilities")
 
     def phase_elog(self) -> PhaseResult:
-        """Surface post-merge elog messages emerge wrote during this run.
-        These carry manual follow-up steps that scroll past during a big build."""
+        # Post-merge messages that scrolled past during the build.
         pkgs = self._new_elog_packages()
         if not pkgs:
             return PhaseResult("elog", ok=True, detail="no new elog messages")
@@ -418,7 +381,7 @@ class Updater:
                            detail=f"{len(pkgs)} elog message(s): {', '.join(pkgs)}")
 
     def _new_elog_packages(self) -> list[str]:
-        """Package names whose elog files were written during this run."""
+        # elog files written since the run started.
         try:
             entries = os.scandir(ELOG_DIR)
         except OSError:
@@ -437,7 +400,6 @@ class Updater:
         return sorted(set(found))
 
     def phase_snapshot(self) -> PhaseResult:
-        """Take a btrfs snapshot before applying, if supported."""
         if not self.snapshots.available:
             return PhaseResult("snapshot", ok=True, skipped=True,
                                detail="btrfs/snapper not available")
@@ -456,7 +418,7 @@ class Updater:
                                detail=f"failed, continued: {exc}")
 
     def phase_apply(self) -> PhaseResult:
-        """The real update. Streamed so the user sees compile progress live."""
+        # The real update, streamed so you see the build live.
         if self.report.plan and self.report.plan.total == 0:
             return PhaseResult("apply", ok=True, skipped=True,
                                detail="nothing to do")
@@ -466,8 +428,7 @@ class Updater:
         cmd = ["emerge", "--update", "--deep", "--newuse",
                "--with-bdeps=y", "--keep-going", "@world"]
         if self._excludes:
-            # Apply the same exclusions the user picked at the plan step.
-            cmd += ["--exclude", " ".join(self._excludes)]
+            cmd += ["--exclude", " ".join(self._excludes)]  # same as the plan step
         res = self.run.stream(cmd)
         if res.returncode != 0:
             ui.error("emerge @world exited non-zero. Some packages may have failed.")
@@ -476,7 +437,7 @@ class Updater:
         return PhaseResult("apply", ok=True, detail="world updated")
 
     def phase_postupdate(self) -> PhaseResult:
-        """Rebuild consumers of replaced libs and out-of-tree modules."""
+        # Rebuild consumers of replaced libs, plus out-of-tree modules.
         overall_ok = True
         details = []
 
@@ -484,8 +445,7 @@ class Updater:
         details.append(f"preserved-rebuild rc={pres.returncode}")
         overall_ok &= pres.returncode == 0
 
-        # @module-rebuild only matters if there are external modules; it's
-        # harmless (fast no-op) if there aren't.
+        # @module-rebuild is a fast no-op when there are no external modules.
         mres = self.run.stream(["emerge", "@module-rebuild"])
         details.append(f"module-rebuild rc={mres.returncode}")
         overall_ok &= mres.returncode == 0
@@ -493,9 +453,7 @@ class Updater:
         return PhaseResult("post-update", ok=overall_ok, detail=", ".join(details))
 
     def phase_config(self) -> PhaseResult:
-        """Handle pending config-file updates (._cfg files)."""
-        # dispatch-conf is interactive by nature. In unattended mode we don't
-        # auto-merge configs -- that's too risky -- we just report they exist.
+        # dispatch-conf is interactive; unattended we only report, never auto-merge.
         pending = self._count_pending_configs()
         if pending == 0:
             return PhaseResult("config", ok=True, detail="no config updates")
@@ -508,12 +466,9 @@ class Updater:
         return PhaseResult("config", ok=True, detail=f"{pending} pending (deferred)")
 
     def phase_depclean(self) -> PhaseResult:
-        """Remove orphaned packages (not required by @world), opt-in and careful.
-
-        Always pretends first and shows the count. Removal is gated on an
-        explicit confirmation because depclean can drop packages you actually
-        want but never added to @world. `emerge --depclean` itself refuses
-        removals that would break reverse dependencies."""
+        # Remove orphans, carefully: pretend first, confirm before removing.
+        # depclean can drop packages you use but never added to @world (emerge
+        # still refuses anything that'd break a reverse dep).
         res = self.run.capture(["emerge", "--depclean", "--pretend"])
         removable = advise.parse_depclean_count(res.stdout)
         if removable == 0:
@@ -533,11 +488,10 @@ class Updater:
                            detail=f"removed up to {removable} package(s)")
 
     def phase_verify(self) -> PhaseResult:
-        """Post-update health checks that don't change anything."""
+        # Read-only health checks after the update.
         details = []
         ok = True
 
-        # broken library linkage
         if shutil.which("revdep-rebuild"):
             r = self.run.capture(["revdep-rebuild", "-p", "-i"])
             broken = "broken" in r.stdout.lower() and "no broken" not in r.stdout.lower()
@@ -548,7 +502,6 @@ class Updater:
         else:
             details.append("linkage:skipped")
 
-        # anything still needing a preserved rebuild?
         r2 = self.run.capture(["emerge", "-p", "@preserved-rebuild"])
         needs = "Total: 0 packages" not in r2.stdout
         details.append("preserved:pending" if needs else "preserved:clean")
@@ -557,9 +510,8 @@ class Updater:
         return PhaseResult("verify", ok=ok, detail=", ".join(details))
 
     def _count_pending_configs(self) -> int:
-        """Count ._cfg* files portage has staged for review."""
-        # These live scattered under /etc (and elsewhere in CONFIG_PROTECT dirs).
-        # We use find rather than parsing portage internals for robustness.
+        # ._cfg files live all over CONFIG_PROTECT dirs; find is simpler and more
+        # robust than poking at portage internals.
         res = self.run.capture(
             ["find", "/etc", "-name", "._cfg????_*", "-type", "f"]
         )
@@ -569,7 +521,6 @@ class Updater:
 
     def run_all(self, *, skip_snapshot: bool = False,
                 skip_sync: bool = False) -> UpdateReport:
-        """Execute the full pipeline in order, stopping on fatal failures."""
         sequence = [
             ("preflight", self.phase_preflight, True),
             ("news", self.phase_news, True),
@@ -581,8 +532,8 @@ class Updater:
             ("config", self.phase_config, True),
             ("post-update", self.phase_postupdate, True),
         ]
-        # depclean is opt-in; only add it to the pipeline when enabled, so the
-        # common run doesn't carry a noisy "skipped" row for a feature that's off.
+        # depclean is opt-in; only add it when enabled so the common run doesn't
+        # carry a "skipped" row for a feature that's off.
         if self.include_depclean:
             sequence.append(("depclean", self.phase_depclean, True))
         sequence += [
@@ -606,9 +557,9 @@ class Updater:
                 self.report.add(result)
                 ui.phase_done(result)
 
+                # A failed fatal phase stops the run. apply is not fatal, so we
+                # still reach verify to report the damage.
                 if not result.ok and not result.skipped:
-                    # Fatal phases stop the run. 'plan' failing means we never
-                    # apply; 'apply' failing means we still run verify to report.
                     if name in ("preflight", "news", "sync", "plan", "snapshot"):
                         ui.error(f"Phase '{name}' failed: {result.detail}. Stopping.")
                         break
@@ -620,9 +571,8 @@ class Updater:
         return self.report
 
     def _finalize(self, *, command: str) -> None:
-        """Best-effort side-channels after a run: audit trail + notification.
-        Neither is allowed to raise into the caller -- the update already
-        happened; recording it is secondary."""
+        # Audit log + notification. Both best-effort: the update already happened,
+        # so neither is allowed to raise.
         if self.audit_log is not None:
             try:
                 record = _audit.build_record(
@@ -630,17 +580,16 @@ class Updater:
                     version=__version__, command=command,
                 )
                 self.audit_log.record(record)
-            except Exception as exc:  # noqa: BLE001 - never fail a run over logging
+            except Exception as exc:  # noqa: BLE001
                 ui.dim(f"(audit log skipped: {exc})")
         if self.notifier is not None:
             try:
                 self.notifier.maybe_notify(self.report, command=command)
-            except Exception as exc:  # noqa: BLE001 - notifications are best-effort
+            except Exception as exc:  # noqa: BLE001
                 ui.dim(f"(notification skipped: {exc})")
 
     def _compute_reboot_advice(self) -> None:
-        """If the applied update touched kernel/glibc/systemd/dbus, record that a
-        reboot is advisable so the summary can flag it."""
+        # Flag a reboot if the applied update touched kernel/glibc/systemd/dbus.
         applied = next((p for p in self.report.phases if p.name == "apply"), None)
         if not applied or applied.skipped or not applied.ok:
             return
@@ -650,7 +599,7 @@ class Updater:
         self.report.reboot_pkgs = advise.packages_needing_reboot(names)
 
     def run_depclean(self) -> int:
-        """Standalone `gup depclean`: preflight, then the depclean phase only."""
+        # Standalone `gup depclean`: preflight then depclean, nothing else.
         pre = self.phase_preflight()
         self.report.add(pre)
         if not pre.ok:
@@ -667,7 +616,6 @@ class Updater:
     # -- rollback --------------------------------------------------------
 
     def run_rollback(self) -> int:
-        """Interactive-ish rollback: list our snapshots, pick one, restore it."""
         if not self.snapshots.available:
             ui.error("No snapshot backend (snapper/btrfs) available -- nothing to "
                      "roll back to.")
@@ -697,7 +645,7 @@ class Updater:
         return 0
 
     def _choose_snapshot(self, snaps):
-        """Pick a snapshot: newest under -y/non-interactive, else prompt."""
+        # Newest under -y/non-interactive, otherwise ask.
         if self.assume_yes or not self.interactive:
-            return snaps[-1]  # newest
+            return snaps[-1]
         return ui.select_snapshot(snaps)

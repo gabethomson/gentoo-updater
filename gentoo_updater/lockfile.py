@@ -1,5 +1,5 @@
-"""Single-instance lock so two mutating runs (or a run racing a manual emerge
-of our own) can't proceed at once. Advisory flock; released on exit/crash."""
+"""Advisory flock so two update runs can't step on each other. Released on
+exit or crash."""
 
 from __future__ import annotations
 
@@ -18,8 +18,7 @@ class AlreadyRunning(RuntimeError):
 
 
 def _open_lockfile() -> "tuple[object, str]":
-    """Open the lockfile, falling back to a temp dir if /run/lock isn't writable
-    (e.g. running as a non-root user for a dry-run)."""
+    # /run/lock first; fall back to the temp dir when we're not root (dry-run).
     for path in (_PREFERRED, os.path.join(tempfile.gettempdir(), "gentoo-updater.lock")):
         try:
             fh = open(path, "w")
@@ -31,9 +30,7 @@ def _open_lockfile() -> "tuple[object, str]":
 
 @contextlib.contextmanager
 def single_instance():
-    """Hold an exclusive, non-blocking lock for the duration of the block.
-
-    Raises AlreadyRunning if another process already holds it."""
+    """Hold the lock for the block. Raises AlreadyRunning if someone else has it."""
     fh, path = _open_lockfile()
     try:
         try:

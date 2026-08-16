@@ -1,6 +1,4 @@
 """Tests for the emerge --pretend parser.
-
-Run with:  python -m pytest   (or just: python tests/test_parse.py)
 """
 
 import os

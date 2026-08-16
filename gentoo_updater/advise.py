@@ -1,8 +1,5 @@
-"""Pure parsing/advisory helpers, kept free of side effects so they're testable.
-
-Everything here takes text (or plain data) in and returns structured data out --
-no subprocess, no filesystem. The updater wires these to real command output.
-"""
+"""Text parsers: command output in, structured data out. No I/O, so they're
+easy to test. The updater feeds them real emerge/glsa/news output."""
 
 from __future__ import annotations
 
@@ -11,9 +8,8 @@ from dataclasses import dataclass, field
 
 # --- reboot advisory ----------------------------------------------------
 
-# Updating any of these means the running system no longer matches what's on
-# disk in a way a reboot (or at least a re-exec of init) resolves. We advise,
-# never force.
+# Updating these means the running system no longer matches disk in a way only
+# a reboot fixes. We advise, we don't force.
 REBOOT_PREFIXES = (
     "sys-kernel/",        # kernel image / sources / linux-firmware
     "sys-libs/glibc",
@@ -23,7 +19,6 @@ REBOOT_PREFIXES = (
 
 
 def packages_needing_reboot(names) -> list[str]:
-    """Subset of package names (category/pkg) whose update warrants a reboot."""
     hits = {
         n for n in names
         if any(n == p.rstrip("/") or n.startswith(p) for p in REBOOT_PREFIXES)
@@ -60,21 +55,19 @@ class AutounmaskSuggestion:
 
 
 def _is_suggestion_line(line: str) -> bool:
-    """A real atom line, not a note/comment/blank from emerge's block."""
+    # A real atom line, not a "(see ... man page)" note or a blank.
     s = line.strip()
     if not s:
         return False
     if s.startswith("(") or s.startswith("!!!"):
-        return False  # "(see ... man page)" notes
-    # atom lines start with a version operator (>=, <=, ~, =, ...) or a
-    # category/name token directly
+        return False
+    # atoms start with a version operator (>=, ~, =, ...) or the category
     return bool(re.match(r"^[<>=~]*[a-z0-9]", s))
 
 
 def parse_autounmask(text: str) -> AutounmaskSuggestion:
-    """Extract emerge's suggested keyword/USE/mask/license changes from a failed
-    `emerge --pretend` (its stdout+stderr). Tolerant: unrecognized output yields
-    an empty suggestion rather than an error."""
+    # Pull emerge's suggested keyword/USE/mask/license edits out of a failed
+    # pretend. Unrecognised output -> empty, never an error.
     lines = text.splitlines()
     suggestion = AutounmaskSuggestion()
 
@@ -116,7 +109,7 @@ _GLSA_ID = re.compile(r"^\s*(\d{6}-\d+)\b")
 
 
 def parse_glsa_ids(text: str) -> list[str]:
-    """Pull affected GLSA ids (e.g. 202501-07) from `glsa-check -t all` output."""
+    # Affected GLSA ids (e.g. 202501-07) from `glsa-check -t all`.
     ids = []
     for line in text.splitlines():
         m = _GLSA_ID.match(line)
@@ -127,11 +120,9 @@ def parse_glsa_ids(text: str) -> list[str]:
 
 # --- news correlation ---------------------------------------------------
 #
-# GLEP 42 news items carry headers at the top of the file, one of which --
-# `Display-If-Installed:` -- names a package atom the item is about. We parse
-# those and cross-reference them against the packages a run is about to touch,
-# so "there's unread news specifically about glibc, which you're upgrading"
-# surfaces at the plan step instead of being buried in `eselect news`.
+# GLEP 42 news items have a Display-If-Installed header naming a package the
+# item is about. Match those against the pending update so news about a package
+# you're upgrading shows up at the plan step, not buried in `eselect news`.
 
 _NEWS_TITLE = re.compile(r"^Title:\s*(.+?)\s*$")
 _NEWS_IF_INSTALLED = re.compile(r"^Display-If-Installed:\s*(.+?)\s*$")
@@ -144,9 +135,7 @@ class NewsItem:
 
 
 def news_atom_name(atom: str) -> str:
-    """Reduce a Display-If-Installed atom to its cat/pkg name, dropping version
-    operators, slot, repo, and trailing version (e.g. '>=sys-apps/portage-3.0'
-    -> 'sys-apps/portage')."""
+    # '>=sys-apps/portage-3.0' -> 'sys-apps/portage'.
     a = atom.strip()
     a = re.sub(r"^[<>=~!]+", "", a)     # version operators
     a = a.split("::", 1)[0]             # ::repo
@@ -156,8 +145,7 @@ def news_atom_name(atom: str) -> str:
 
 
 def parse_news_item(text: str) -> NewsItem:
-    """Extract the title and any Display-If-Installed package names from one
-    GLEP 42 news item. Headers live before the first blank line."""
+    # Title + Display-If-Installed names. Headers are above the first blank line.
     title = ""
     installed: list[str] = []
     for line in text.splitlines():
@@ -174,8 +162,7 @@ def parse_news_item(text: str) -> NewsItem:
 
 
 def relevant_news(items, package_names) -> list[tuple[str, list[str]]]:
-    """Pair each news item with the subset of `package_names` it's about. Items
-    that match nothing are dropped. Returns [(title, [matched cat/pkg, ...])]."""
+    # [(title, [matched cat/pkg])] for items that touch a pending package.
     names = set(package_names)
     out: list[tuple[str, list[str]]] = []
     for it in items:
@@ -195,11 +182,8 @@ _DEPCLEAN_COUNT = re.compile(r"Number (?:to remove|removed):\s*(\d+)")
 
 
 def parse_depclean_count(text: str) -> int:
-    """How many packages `emerge --depclean --pretend` would remove.
-
-    Prefers portage's own "Number to remove: N" line when present; otherwise
-    counts atom lines under the "would be unmerged" header. Returns 0 when
-    nothing is removable (or the output is unrecognised)."""
+    # How many `emerge --depclean -p` would remove. Trust portage's own
+    # "Number to remove: N" if it's there, else count the atom lines.
     for line in text.splitlines():
         m = _DEPCLEAN_COUNT.search(line)
         if m:
@@ -222,8 +206,7 @@ _ELOG_NAME = re.compile(r"^([a-z0-9+_.-]+):([a-z0-9+_.-]+):\d{8}-\d{6}\.log$")
 
 
 def elog_package_from_filename(fname: str) -> str | None:
-    """Turn an elog filename into 'category/package-version', or None if it
-    doesn't look like a portage elog file."""
+    # 'cat:pkg-ver:stamp.log' -> 'cat/pkg-ver', or None if it's not one.
     m = _ELOG_NAME.match(fname.strip())
     if not m:
         return None

@@ -1,8 +1,6 @@
 """Tests for notification triggers, message building, and channel dispatch.
 
 Delivery is faked (no shelling out) via the injectable `send`/`which` seams.
-
-Run with:  python -m pytest   (or standalone: python tests/test_notify.py)
 """
 
 import os

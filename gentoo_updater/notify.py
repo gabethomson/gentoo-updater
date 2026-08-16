@@ -1,11 +1,6 @@
-"""Run-completion notifications: desktop and/or email.
-
-Useful when `gup` runs unattended (a systemd timer): you want to hear about a
-failed update or a pending reboot without watching the terminal. What triggers a
-notification is configurable (never / failure / reboot / always). The decision
-logic and message text are pure functions; actual delivery goes through an
-injectable `send` seam so tests never shell out.
-"""
+"""Desktop / email notification when a run finishes. Mostly for unattended runs
+where nobody's watching the terminal. `send` is injectable so tests don't shell
+out."""
 
 from __future__ import annotations
 
@@ -14,7 +9,6 @@ import subprocess
 
 
 def should_notify(report, trigger: str) -> bool:
-    """Given the run outcome and the configured trigger, should we notify?"""
     if trigger == "never":
         return False
     if trigger == "always":
@@ -27,7 +21,6 @@ def should_notify(report, trigger: str) -> bool:
 
 
 def build_notification(report, *, command: str = "update") -> tuple[str, str]:
-    """Return (title, body) summarising the run for a notification."""
     if report.failed:
         failed = [p.name for p in report.phases if not p.ok and not p.skipped]
         title = "gentoo-updater: update FAILED"
@@ -45,7 +38,6 @@ def build_notification(report, *, command: str = "update") -> tuple[str, str]:
 
 
 def _default_send(argv: list[str], *, input_text: str | None = None) -> int:
-    """Real delivery: run a command, swallowing its output. Best-effort."""
     try:
         proc = subprocess.run(argv, input=input_text, text=True,
                               capture_output=True, check=False)
@@ -55,16 +47,13 @@ def _default_send(argv: list[str], *, input_text: str | None = None) -> int:
 
 
 class Notifier:
-    """Dispatches a built notification to the enabled channels. `send` is
-    injectable for tests; `which` locates optional mailers/notifiers."""
-
     def __init__(self, config, *, send=None, which=shutil.which):
         self.config = config
         self._send = send or _default_send
         self._which = which
 
     def maybe_notify(self, report, *, command: str = "update") -> list[str]:
-        """Notify per config/outcome. Returns the channels actually used."""
+        # Returns the channels that actually fired.
         if not should_notify(report, self.config.notify):
             return []
         title, body = build_notification(report, command=command)

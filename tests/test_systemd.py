@@ -1,6 +1,4 @@
 """Tests for systemd unit rendering and the install fallback.
-
-Run with:  python -m pytest   (or standalone: python tests/test_systemd.py)
 """
 
 import os
