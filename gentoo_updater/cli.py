@@ -28,6 +28,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gup",
         description="Wraps emerge world updates with snapshots, checks, and rollback.",
     )
+    p.add_argument("--version", action="version",
+                   version=f"gup {__version__}")
 
     # default=None on the toggles so we can tell "not passed" (use config) from
     # "passed" (override it). Plain store_true would force False.

@@ -9,7 +9,6 @@ import os
 import shutil
 import time
 from dataclasses import dataclass, field
-from enum import Enum
 
 _log = logging.getLogger("gentoo_updater.updater")
 
@@ -32,12 +31,6 @@ LOW_SPACE_GIB = 5.0
 # point them at a fixture tree.
 NEWS_UNREAD_GLOB = "/var/lib/gentoo/news/news-*.unread"
 NEWS_REPOS_GLOB = "/var/db/repos/*/metadata/news"
-
-
-class Risk(Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
 
 
 # Toolchain, init, kernel, core libs. Upgrades here are the ones most likely to

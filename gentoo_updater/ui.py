@@ -28,7 +28,7 @@ except Exception:  # noqa: BLE001 - rich is optional
 # owns the terminal.
 _PLAIN = False              # --plain
 _active = False             # is the spinner in use this run?
-_paused = False             # temporarily handed the terminal to someone else
+_paused = 0                 # depth: >0 means someone else owns the terminal
 _current: "str | None" = None  # name of the phase currently running
 _run_start: float = 0.0
 _lock = threading.Lock()    # serialises every write to the terminal
@@ -288,7 +288,7 @@ def begin_run(phase_names: list[str]) -> None:
     global _active, _paused, _current, _run_start, _anim_thread, _anim_stop
     _run_start = time.time()
     _current = None
-    _paused = False
+    _paused = 0
     _active = _dashboard_wanted()
     if _active:
         _anim_stop = threading.Event()
@@ -316,18 +316,20 @@ def phase_done(result) -> None:
 def suspend():
     # Hand the terminal to a subprocess / prompt / picker: pause the spinner and
     # wipe its line, then resume for the still-running phase. No-op when idle.
+    # Counted rather than a flag, so a nested suspend (a prompt inside a phase
+    # that's already suspended) doesn't resume the spinner too early.
     global _paused
     if not _active:
         yield
         return
-    _paused = True
+    _paused += 1
     with _lock:
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
     try:
         yield
     finally:
-        _paused = False
+        _paused -= 1
 
 
 def end_run(report) -> None:

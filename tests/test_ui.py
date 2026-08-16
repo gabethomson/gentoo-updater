@@ -48,6 +48,23 @@ class InactiveWithoutTty(unittest.TestCase):
             pass
         self.assertIsNone(ui._anim_thread)
 
+    def test_nested_suspend_does_not_resume_early(self):
+        # Force the spinner "active" so suspend() takes its real path, and check
+        # the pause depth: the inner exit must not un-pause the outer.
+        ui._active = True
+        # suspend() writes an erase-line sequence; keep it out of test output.
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                with ui.suspend():
+                    self.assertEqual(ui._paused, 1)
+                    with ui.suspend():
+                        self.assertEqual(ui._paused, 2)
+                    self.assertEqual(ui._paused, 1,
+                                     "inner exit un-paused too early")
+                self.assertEqual(ui._paused, 0)
+            finally:
+                ui._active = False
+
     def test_end_run_resets_state(self):
         ui.begin_run(["preflight"])
         with contextlib.redirect_stdout(io.StringIO()):
