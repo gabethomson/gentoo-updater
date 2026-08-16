@@ -1,10 +1,12 @@
 # gentoo-updater (`gup`)
 
-**Updating Gentoo is a ritual. `gup` is the checklist that makes sure you don't skip a step.**
+A wrapper around Gentoo world updates. It doesn't replace `emerge` — it runs the
+same commands you'd type by hand, in the right order, and adds the checks a bare
+update sequence skips: a snapshot first, risk flagging, news, and health checks
+after.
 
-It's not a replacement for `emerge` — it's the careful sysadmin sitting next to you, running the exact same commands you'd type by hand, but never forgetting the snapshot, never missing the news item that says *"read this before you update"*, and always checking that nothing broke on the way out.
-
-No magic. No hidden state. Every command it runs is printed to your terminal, prefixed with `$`, so you can watch it work and learn the sequence yourself.
+Every command it runs is printed to the terminal, prefixed with `$`. Nothing is
+hidden.
 
 ```
 ── gentoo-updater ───────────────────────────────
@@ -20,36 +22,30 @@ No magic. No hidden state. Every command it runs is printed to your terminal, pr
   elapsed 04:18
 ```
 
----
+## What it does
 
-## The problem
-
-A "real" Gentoo update isn't one command — it's a sequence of them, with judgement calls in between:
+A normal update is a sequence with decision points:
 
 ```bash
-emaint sync -a                          # pull the tree
-eselect news read                       # ...and actually read it
-emerge -avuDN --with-bdeps=y @world     # the main event
-dispatch-conf                           # merge the config churn
-emerge @preserved-rebuild               # fix the libs you just replaced
-emerge @module-rebuild                  # rebuild out-of-tree modules
+emaint sync -a
+eselect news read
+emerge -avuDN --with-bdeps=y @world
+dispatch-conf
+emerge @preserved-rebuild
+emerge @module-rebuild
 ```
 
-Miss a step and you find out later — a broken linkage here, an unread warning there, a kernel you can't boot into and no snapshot to fall back to. `gup` runs the whole dance for you and adds the guardrails a bare sequence doesn't have.
+`gup` runs that, and also:
 
-## What it actually does
-
-- **Snapshots before it touches anything** — btrfs/snapper restore point up front, so a bad update is one `gup rollback` away.
-- **Tells you what's risky** — parses the pending update and flags the scary stuff (gcc, glibc, systemd, the kernel, llvm, rust, python) *before* you commit.
-- **Lets you cherry-pick** — `--select` turns the plan into a checklist; uncheck anything you want to sit out this round.
-- **Watches your back on security** — runs `glsa-check` and names any package with a known advisory against it.
-- **Won't let you skip the news** — unread news items often say "do X first". It surfaces them, pauses so you can read them, and — the good part — at the plan step it calls out any unread item that's *specifically about a package you're updating* (via its `Display-If-Installed` header).
-- **Decodes the wall of red** — when the resolver wants keyword/USE changes, it hands you the exact `/etc/portage` lines instead of a cryptic failure.
-- **Checks its own work** — broken-linkage and preserved-rebuild scans afterward, plus the `elog` messages that usually scroll into oblivion during a big build.
-- **Tells you when to reboot** — flags updates that touched the kernel, glibc, systemd, or dbus.
-- **Keeps a diary** — an optional JSONL audit log of every run, and desktop/email notifications when you want them.
-- **Runs itself** — `gup install-schedule` sets up hands-off updates on systemd, OpenRC, *or* runit.
-- **Tidies up** — an opt-in `depclean` step that prunes orphans without doing anything reckless.
+- Takes a btrfs/snapper snapshot before applying (`gup rollback` restores it).
+- Flags high-risk packages in the plan (gcc, glibc, systemd, kernel, llvm, rust, python).
+- Lets you cherry-pick packages to update with `--select`.
+- Runs `glsa-check` for known vulnerabilities.
+- Warns on unread news, and flags any unread item that's about a package you're updating.
+- Shows the exact `/etc/portage` lines to add when the resolver needs keyword/USE changes.
+- Checks for broken linkage, pending preserved rebuilds, and post-merge `elog` messages afterward.
+- Advises a reboot when the update touched the kernel, glibc, systemd, or dbus.
+- Optional: JSONL audit log, desktop/email notifications, scheduled runs, and depclean.
 
 ## Install
 
@@ -58,87 +54,94 @@ git clone https://github.com/kenny/gentoo-updater
 cd gentoo-updater
 pip install --user .
 
-# optional, for colour + tables + the live dashboard:
+# optional, for colour/tables/the live dashboard:
 pip install --user 'rich>=13'
 ```
 
-Works fine without `rich` — it just falls back to plain text. Nothing else is required; it leans entirely on the Portage tooling you already have.
+Works without `rich` (plain text fallback). No other dependencies.
 
-## Quick start
+## Usage
 
 ```bash
-gup                  # the full ride, interactive — prompts at the decision points
+gup                  # full update, interactive
 gup -y                # unattended: assume yes, apply automatically
-gup --dry-run         # narrate every step, change nothing
-gup --select          # pick exactly which packages to update (arrow-key checklist)
-```
+gup --dry-run         # print what would run, change nothing
+gup --select          # pick which packages to update (checklist)
 
-And the focused sub-commands, for when you don't want the whole pipeline:
-
-```bash
-gup plan              # just show the pending update (no sync, no apply)
-gup verify            # only the post-update health checks
-gup news              # show / read pending news
+gup plan              # show the pending update only (no sync/apply)
+gup verify            # post-update health checks only
+gup news              # show/read pending news
 gup rollback          # restore a pre-update snapshot
-gup depclean          # prune orphaned packages (asks first)
+gup depclean          # remove orphaned packages (asks first)
 gup install-schedule  # set up unattended runs (auto-detects your init)
-gup install-timer     # shortcut for 'install-schedule --init systemd'
+gup install-timer     # = install-schedule --init systemd
 ```
 
 ### Flags
 
-| Flag | What it does |
+| Flag | Effect |
 |---|---|
-| `-y`, `--yes` | Assume yes to every prompt and apply automatically (unattended) |
-| `--non-interactive` | Never prompt; report where a prompt *would* be (won't auto-apply unless `-y`) |
-| `--dry-run` | Never run a mutating command; just print what would run |
-| `--plain` | Turn off the live dashboard; plain linear output |
-| `--select` | Interactively pick which pending packages to update |
+| `-y`, `--yes` | Assume yes to all prompts; apply automatically |
+| `--non-interactive` | Never prompt; report where prompts would be (won't auto-apply unless `-y`) |
+| `--dry-run` | Never run a mutating command; print what would run |
+| `--plain` | No live dashboard; plain linear output |
+| `--select` | Pick which pending packages to update |
 | `--no-snapshot` | Skip the pre-update snapshot |
-| `--no-sync` | Skip the repo sync (use the tree as-is) |
-| `--no-sudo` | Don't prepend `sudo` (you're already root) |
+| `--no-sync` | Skip the repo sync |
+| `--no-sudo` | Don't prepend `sudo` (already root) |
 | `--depclean` | Also run a depclean step (pretends first, asks before removing) |
-| `--notify WHEN` | Completion notification: `never` · `failure` · `reboot` · `always` |
-| `--no-audit` | Don't append a record to the audit log |
-| `--config PATH` | Use only this config file (skip the default locations) |
-| `--init WHICH` | Target init for `install-schedule`: `auto` · `systemd` · `openrc` · `runit` · `cron` |
-| `--schedule PERIOD` | Cadence for `install-schedule`: `daily`/`weekly`/`monthly` (systemd also takes any `OnCalendar=`) |
+| `--notify WHEN` | Notify on completion: `never` / `failure` / `reboot` / `always` |
+| `--no-audit` | Don't append a run record to the audit log |
+| `--config PATH` | Use only this config file |
+| `--init WHICH` | Target init for `install-schedule`: `auto`, `systemd`, `openrc`, `runit`, `cron` |
+| `--schedule PERIOD` | Cadence for `install-schedule`: `daily`/`weekly`/`monthly` |
 
-**Interactive vs unattended.** Interactive (the default) stops to let you read news, confirm the snapshot, and approve the apply — the way you'd want to run a desktop update. `-y` runs start to finish with zero input, which is what the scheduler uses. It *will* apply automatically, so only pair it with `--no-snapshot` if you trust the setup.
+Interactive (default) prompts before applying, before the snapshot, and stops to
+let you read news. `-y` runs the whole thing with no input — that's what the
+scheduler uses.
 
 ## While it runs
 
-With `rich` on a real terminal, `gup` draws a live dashboard: a phase checklist pinned to the bottom of the screen, a spinner on whatever's running, and a running clock. Finished phases collapse to a green `OK` (or a red one if something went sideways).
+With `rich` on a real terminal, `gup` shows a live checklist pinned to the bottom
+of the screen: a spinner on the current phase and a running clock. Finished
+phases show `OK` (or a red one on failure).
 
-When it's time for the heavy lifting — the sync, the actual `emerge`, `dispatch-conf` — the panel politely **steps aside** and lets Portage stream its own output, in its own colours, exactly as if you'd run it yourself. Then the panel snaps back and ticks the phase off. No captured logs, no lost progress bars.
+During the streaming phases (sync, the real `emerge`, `dispatch-conf`) the panel
+drops so Portage streams its own output normally, then comes back. Piped output,
+cron, or no `rich` falls back to plain output. Force that anywhere with `--plain`.
 
-Piping to a file, running under cron, or no `rich`? It quietly drops to plain linear output. Force that anywhere with `--plain`.
+## Phases
 
-## The phases
-
-1. **preflight** — confirm `emerge`/`emaint` exist, note the optional tools, warn if the build dir is low on space
-2. **news** — check for unread news and offer to read it
-3. **sync** — `emaint sync -a` across every repo and overlay
-4. **plan** — `emerge -pvuDN @world`, parsed and categorised, risk flagged, and cross-referenced against unread news (flags items whose `Display-If-Installed` package is in this update); on a masked resolution it hands you the `/etc/portage` fix
-5. **glsa** — `glsa-check` for known security advisories (informational)
-6. **snapshot** — the btrfs/snapper restore point
+1. **preflight** — check `emerge`/`emaint` exist, note optional tools, warn on low build-dir space
+2. **news** — check for unread news, offer to read it
+3. **sync** — `emaint sync -a`
+4. **plan** — `emerge -pvuDN @world`, parsed and risk-flagged, cross-referenced against unread news; shows the `/etc/portage` fix on a masked resolution
+5. **glsa** — `glsa-check` for known advisories (informational)
+6. **snapshot** — btrfs/snapper restore point
 7. **apply** — the real `@world` update
 8. **config** — pending `._cfg` files via `dispatch-conf`
 9. **post-update** — `@preserved-rebuild` + `@module-rebuild`
-10. **elog** — the post-merge messages Portage wrote during the run
+10. **elog** — post-merge messages from the run
 11. **verify** — broken-linkage and preserved-rebuild checks
 
-The **fatal** phases — preflight, news, sync, plan, snapshot — halt the run if they fail, so you never merge against a broken plan or skip a snapshot you asked for. `glsa` and `elog` are informational and never stop anything. An optional **depclean** phase slots in before `elog` when you ask for it.
+Preflight, news, sync, plan, and snapshot are fatal — they stop the run if they
+fail. `glsa` and `elog` are informational. An optional **depclean** phase runs
+before `elog` when enabled.
 
 ## Snapshots & rollback
 
-`gup` prefers **snapper** when a `root` config exists — it plays nice with the tooling you already have. No snapper but `/` is btrfs? It falls back to a plain read-only `btrfs subvolume snapshot` into `/.snapshots/`. Neither? It says so and moves on.
+Uses **snapper** if a `root` config exists, otherwise a raw `btrfs subvolume
+snapshot` into `/.snapshots/` if `/` is btrfs. If neither, snapshots are skipped.
 
-`gup rollback` lists the restore points *it* created and rolls back to the one you pick. Under snapper that's a real `snapper rollback` (effective next boot). For raw btrfs it deliberately **won't** swap subvolumes for you — that's a great way to end up unbootable — and instead prints the manual steps so you stay in control.
+`gup rollback` lists the snapshots gup made and restores the one you pick. Under
+snapper that's a real `snapper rollback` (takes effect on reboot). For raw btrfs
+it won't swap subvolumes for you (that can leave you unbootable) — it prints the
+manual steps instead.
 
 ## Cherry-picking with `--select`
 
-By default `gup` updates all of `@world`. Sometimes you don't want that — maybe you're not ready for the new kernel today. `--select` (interactive runs only) turns the plan step into a checklist: everything starts checked, you uncheck what to hold back.
+`--select` (interactive only) turns the plan step into a checklist. Everything
+starts checked; uncheck what to skip this run.
 
 ```
 Select packages to update  (2/4 selected)
@@ -150,82 +153,95 @@ Select packages to update  (2/4 selected)
    [ ] www-client/firefox   128   → 130
 ```
 
-Whatever you uncheck becomes an `emerge --exclude` atom. Here's the important part: `gup` then **re-runs the pretend with those exclusions** and shows you the *real* resulting plan before applying. So if something you kept still needs the thing you skipped, you find out right there — with a clear message — instead of halfway through a compile. The same exclusions ride along to the actual merge.
+Unchecked packages become `emerge --exclude` atoms. gup re-runs the pretend with
+those exclusions and shows the resulting plan before applying, so a conflict
+(something you kept needs something you skipped) shows up at the plan step. The
+same exclusions go to the actual `emerge`.
 
-Needs a real terminal for the arrow-key list; over a pipe it falls back to a numbered "type the ones to drop" prompt. Turn it on per-run with `--select`, or make it the default with `select = true` in your config.
+Needs a real terminal for the arrow-key list; over a pipe it falls back to a
+numbered prompt. Enable per-run with `--select` or `select = true` in the config.
 
-## Cleaning orphans (`depclean`)
+## depclean
 
-`gup depclean` (or the `--depclean` step) removes packages nothing in `@world` needs anymore. This one can actually bite — so `gup` treats it with respect: it runs `emerge --depclean --pretend` first, tells you how many packages are on the block, and **removes nothing until you say so** (`emerge` itself still refuses anything that'd break a reverse dep). Read the list. Depclean will happily remove that tool you use daily but never added to `@world`.
+`gup depclean` (or the `--depclean` step) removes packages nothing in `@world`
+needs. It pretends first, shows the count, and removes nothing until you confirm.
+`emerge` still refuses anything that would break a reverse dependency. Read the
+list — depclean removes things you use but never added to `@world`.
 
 ## Configuration
 
-Tired of typing the same flags? Pin them in a config file — especially handy for a scheduler that runs `gup` with no arguments. It reads these in order, each overriding the last, and command-line flags beat all of them:
+Set defaults in a config file instead of repeating flags. Read in order, each
+overriding the last; command-line flags win:
 
-1. `/etc/gentoo-updater.toml` — system-wide
-2. `~/.config/gentoo-updater/config.toml` — per-user
-3. flags on the command line — always win
+1. `/etc/gentoo-updater.toml`
+2. `~/.config/gentoo-updater/config.toml`
+3. command-line flags
 
-Keys mirror the flag names. There's a starter at [`contrib/gentoo-updater.toml.example`](contrib/gentoo-updater.toml.example):
+Keys match the flag names. Starter file: [`contrib/gentoo-updater.toml.example`](contrib/gentoo-updater.toml.example).
 
 ```toml
-yes           = false     # unattended: assume yes, apply automatically
+yes           = false
 no_snapshot   = false
-select        = false     # always cherry-pick interactively
-depclean      = false     # include the depclean step (still asks first)
-low_space_gib = 5.0       # warn below this much free build space
-notify        = "reboot"  # never | failure | reboot | always
-notify_email  = ""        # e.g. "root@localhost"; empty = no email
-audit         = true      # append a JSONL record per run
+select        = false
+depclean      = false
+low_space_gib = 5.0
+notify        = "reboot"   # never | failure | reboot | always
+notify_email  = ""
+audit         = true
 ```
 
-Config parsing wants Python 3.11+ (`tomllib`); on anything older the file is simply ignored and the built-in defaults stand.
+Needs Python 3.11+ (`tomllib`); older interpreters ignore the file and use
+defaults.
 
 ## Audit log & notifications
 
-Every `update` and `depclean` run drops one JSON-Lines record into an **audit log** — `/var/log/gentoo-updater/history.jsonl`, or `~/.local/state/…` if that's not writable. Timestamp, every phase's result, the snapshot id, reboot advice, package count. Grep it later to answer *"what did this box do last Tuesday?"* Kill it with `--no-audit` or `audit = false`.
+Each `update`/`depclean` run appends a JSON-Lines record to
+`/var/log/gentoo-updater/history.jsonl` (or `~/.local/state/…` if that isn't
+writable): timestamp, per-phase results, snapshot id, reboot advice, package
+count. Disable with `--no-audit`.
 
-**Notifications** fire when a run finishes, if you've asked them to:
+Notifications fire on completion when configured (`--notify`): `failure` on a
+failed run, `reboot` also when a reboot is advised, `always` every time. Sent via
+`notify-send` and/or email (`sendmail`/`mail` to `notify_email`).
 
-- `failure` — only when something broke
-- `reboot` — that, plus whenever a reboot is advised
-- `always` — every single run
+## Unattended updates (systemd / OpenRC / runit)
 
-Delivery goes out over `notify-send` (desktop) and/or email via `sendmail`/`mail` to `notify_email` — whichever you've got.
+Only the scheduling differs per init. `gup install-schedule` detects your init
+and installs the right thing (as root; `--dry-run` prints it). Override with
+`--init`, set cadence with `--schedule`.
 
-## Unattended updates (systemd · OpenRC · runit)
-
-The tool itself doesn't care what init you run — only the *scheduling* differs. `gup install-schedule` sniffs your init and sets up the right thing (as root; `--dry-run` just prints it). Force it with `--init`, set cadence with `--schedule`.
-
-| Init | What gets installed | How to activate |
+| Init | Installs | Activate |
 |---|---|---|
-| **systemd** | `.service` + `.timer` in `/etc/systemd/system` | `systemctl enable --now gentoo-updater.timer` |
-| **OpenRC** | `/etc/cron.daily/gentoo-updater` | make sure a cron daemon (e.g. cronie) is running |
-| **runit** | `/etc/sv/gentoo-updater/run` (a supervised run-then-sleep loop) | `ln -s /etc/sv/gentoo-updater /var/service/` |
+| systemd | `.service` + `.timer` in `/etc/systemd/system` | `systemctl enable --now gentoo-updater.timer` |
+| OpenRC | `/etc/cron.daily/gentoo-updater` | run a cron daemon (e.g. cronie) |
+| runit | `/etc/sv/gentoo-updater/run` (run-then-sleep loop) | `ln -s /etc/sv/gentoo-updater /var/service/` |
 
 ```bash
-gup install-schedule                 # auto-detect this box
-gup install-schedule --init runit    # or pin one
-gup install-timer                    # = install-schedule --init systemd
+gup install-schedule                 # auto-detect
+gup install-schedule --init runit    # or force one
+gup install-timer                    # = --init systemd
 ```
 
-Under the hood every one of them just runs `gup -y --no-sudo`. Reference copies for all three live in [`contrib/`](contrib/). Do yourself a favour and pair it with `notify = "failure"` so an unattended breakage actually reaches you.
+Each just runs `gup -y --no-sudo`. Reference copies in [`contrib/`](contrib/).
+OpenRC and runit have no timer of their own, which is why they use cron / a
+supervised loop. Pair it with `notify = "failure"` so unattended failures reach
+you.
 
-> Why the split? OpenRC and runit don't *have* a periodic scheduler — they supervise daemons. So `gup` uses cron for OpenRC (the Gentoo-native path) and a supervised sleep-loop for runit. That's why those two need a cron daemon / a runsvdir symlink, and systemd doesn't.
+## Safety notes
 
-## The fine print (a.k.a. safety)
-
-- **It never auto-merges your config files.** `dispatch-conf` is too consequential to automate — even unattended, `gup` just reports what's pending.
-- **It never edits `/etc/portage` for you.** When the resolver needs keyword/USE changes, it *shows* you the lines. You decide.
-- **One at a time.** A single-instance lock stops two `update`/`rollback`/`depclean` runs — or a run racing itself — from colliding.
-- **`--dry-run` means it.** No mutating command runs — snapshot *creation* included — and it skips the audit write and notifications too. Read-only introspection (`emerge --pretend`, snapshot *listing*) still runs, so the dry run reflects reality.
-- **depclean is always opt-in**, and always asks before it removes anything.
-- **Everything is visible.** Every command it runs is echoed, prefixed with `$`.
+- Never auto-merges config files, even unattended — it reports pending ones.
+- Never edits `/etc/portage`; it shows the lines, you apply them.
+- A single-instance lock prevents two runs colliding.
+- `--dry-run` runs no mutating command (snapshot creation included) and skips the
+  audit write and notifications. Read-only checks still run, so it reflects real state.
+- depclean is opt-in and always asks before removing.
 
 ## Status
 
-**v0.2** — single-machine Gentoo, now with a live dashboard, an interactive package picker, a config file, an audit log, notifications, multi-init scheduling, and opt-in depclean. Fleet / multi-distro support is a maybe-someday; explicitly not the goal right now.
+v0.2 — single-machine Gentoo. Live dashboard, package picker, config file, audit
+log, notifications, multi-init scheduling, opt-in depclean. Multi-distro/fleet is
+out of scope for now.
 
 ## License
 
-MIT — do what you like, no warranty. It runs `emerge` as root; read the code, keep your snapshots.
+MIT.
