@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gentoo-updater"
-version = "0.2.0"
-description = "A safer, structured wrapper around portage world updates"
+version = "0.2.1"
+description = "Wraps emerge world updates with snapshots, checks, and rollback"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

@@ -9,13 +9,9 @@ import sys
 import time
 
 try:
-    from rich.console import Console, Group
+    from rich.console import Console
     from rich.table import Table
     from rich.prompt import Confirm
-    from rich.panel import Panel
-    from rich.spinner import Spinner
-    from rich.text import Text
-    from rich.live import Live
     _console: "Console | None" = Console()
     _HAVE_RICH = True
 except Exception:  # noqa: BLE001 - rich is optional
@@ -23,12 +19,16 @@ except Exception:  # noqa: BLE001 - rich is optional
     _HAVE_RICH = False
 
 
-# Live-panel state. Module-level (not an object) because both the updater and
-# the runner talk to ui, and the runner needs suspend() to step the panel aside
-# while a subprocess owns the terminal.
+# Live-status state. Module-level because both the updater and the runner talk to
+# ui, and the runner needs suspend() to drop the spinner while a subprocess owns
+# the terminal. We keep this to a single spinner line (plus a permanent line per
+# finished phase) rather than a pinned multi-line panel -- a big panel can't be
+# reliably erased once a subprocess has scrolled the screen, which leaves stale
+# copies behind. One transient line can.
 _PLAIN = False              # --plain
-_live: "Live | None" = None
-_phases: list[dict] = []    # [{"name", "status", "detail"}]
+_active = False             # is the live spinner in use this run?
+_status = None              # the rich Status (one spinner line), or None
+_current: "str | None" = None  # name of the phase currently running
 _run_start: float = 0.0
 
 
@@ -83,8 +83,8 @@ def hint(msg: str) -> None:
 
 
 def phase_header(name: str) -> None:
-    # The panel already shows the current phase, so skip the rule when it's up.
-    if _live is not None:
+    # The spinner already names the current phase, so skip the rule when it's up.
+    if _active:
         return
     label = f" {name.upper()} "
     if _HAVE_RICH:
@@ -240,14 +240,14 @@ def show_summary(report) -> None:
                else "Run completed successfully.")
 
 
-# -- live dashboard ------------------------------------------------------
+# -- live status ---------------------------------------------------------
+#
+# A single spinner line for the running phase; each finished phase prints one
+# permanent line above it. `run_all` calls begin_run -> phase_start/phase_done*
+# -> end_run, and the runner wraps streamed subprocesses in suspend().
 
-_GLYPH = {  # non-running states; the running phase gets an animated spinner
-    "ok": ("[green]OK[/green]", ""),
-    "fail": ("[red]XX[/red]", "bold red"),
-    "skip": ("[dim]--[/dim]", "dim"),
-    "pending": ("[dim]..[/dim]", "dim"),
-}
+_MARK = {"ok": "[green]OK[/green]", "fail": "[red]XX[/red]",
+         "skip": "[dim]--[/dim]"}
 
 
 def _fmt(seconds: float) -> str:
@@ -257,92 +257,70 @@ def _fmt(seconds: float) -> str:
     return f"{h:d}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
 
-def _render_dashboard():
-    grid = Table.grid(padding=(0, 1))
-    grid.add_column(width=2, justify="center")
-    grid.add_column(no_wrap=True)
-    grid.add_column(overflow="fold")
-    for row in _phases:
-        status = row["status"]
-        if status == "running":
-            marker = Spinner("dots", style="cyan")
-            name = Text(row["name"], style="bold cyan")
-        else:
-            glyph, name_style = _GLYPH.get(status, _GLYPH["pending"])
-            marker = Text.from_markup(glyph)
-            name = Text(row["name"], style=name_style)
-        grid.add_row(marker, name, Text(row.get("detail", ""), style="dim"))
-    footer = Text(f"elapsed {_fmt(time.time() - _run_start)}", style="dim")
-    return Panel(Group(grid, footer), title="gentoo-updater",
-                 title_align="left", border_style="cyan", padding=(0, 1))
-
-
-def _new_live() -> "Live":
-    # transient=True so suspend() erases the panel cleanly and the final summary,
-    # not a frozen checklist, is what's left on screen.
-    return Live(get_renderable=_render_dashboard, console=_console,
-                refresh_per_second=12, transient=True,
-                vertical_overflow="visible")
+def _spinner_label(name: str) -> str:
+    return f"[bold cyan]{name}[/bold cyan] …"
 
 
 def begin_run(phase_names: list[str]) -> None:
-    # Start the panel (no-op in plain/non-tty mode; state is still tracked).
-    global _live, _phases, _run_start
-    _phases = [{"name": n, "status": "pending", "detail": ""} for n in phase_names]
+    # phase_names is accepted for symmetry; the linear view doesn't preview them.
+    global _active, _status, _current, _run_start
     _run_start = time.time()
-    if not _dashboard_wanted():
-        _live = None
-        return
-    _live = _new_live()
-    _live.start()
-
-
-def _row(name: str) -> "dict | None":
-    return next((r for r in _phases if r["name"] == name), None)
+    _current = None
+    _status = None
+    _active = _dashboard_wanted()
 
 
 def phase_start(name: str) -> None:
-    row = _row(name)
-    if row is not None:
-        row["status"] = "running"
-    if _live is not None:
-        _live.refresh()
+    global _status, _current
+    _current = name
+    if not _active:
+        return
+    if _status is None:
+        _status = _console.status(_spinner_label(name), spinner="dots")
+        _status.start()
+    else:
+        _status.update(_spinner_label(name))
 
 
 def phase_done(result) -> None:
-    row = _row(result.name)
-    if row is not None:
-        row["status"] = ("skip" if result.skipped
-                         else "ok" if result.ok else "fail")
-        row["detail"] = result.detail
-    if _live is not None:
-        _live.refresh()
+    global _current
+    _current = None
+    if not _active:
+        return
+    mark = (_MARK["skip"] if result.skipped
+            else _MARK["ok"] if result.ok else _MARK["fail"])
+    # Printed through the console while the status is live -> lands above the
+    # spinner as a permanent line.
+    _console.print(f"{mark} [bold]{result.name}[/bold]  [dim]{result.detail}[/dim]")
 
 
 @contextlib.contextmanager
 def suspend():
-    # Drop the panel so a subprocess/prompt gets the terminal, then bring it
-    # back. No-op when there's no panel.
-    global _live
-    if _live is None:
+    # Stop the spinner so a subprocess/prompt owns the terminal, then bring it
+    # back for the still-running phase. No-op when the spinner isn't up.
+    global _status
+    if not _active or _status is None:
         yield
         return
-    _live.stop()
-    _live = None
+    _status.stop()
+    _status = None
     try:
         yield
     finally:
-        # Only resume if the run hasn't been finalized in the meantime.
-        if _phases and any(r["status"] in ("pending", "running") for r in _phases):
-            _live = _new_live()
-            _live.start()
+        if _current is not None:  # a phase is still running
+            _status = _console.status(_spinner_label(_current), spinner="dots")
+            _status.start()
 
 
 def end_run(report) -> None:
-    # Stop the panel, print the summary that stays on screen.
-    global _live, _phases
-    if _live is not None:
-        _live.stop()
-        _live = None
-    _phases = []
+    global _active, _status, _current
+    if _status is not None:
+        _status.stop()
+        _status = None
+    elapsed = _fmt(time.time() - _run_start) if _run_start else ""
+    _active = False
+    _current = None
     show_summary(report)
+    if elapsed:
+        _console.print(f"[dim]elapsed {elapsed}[/dim]") if _HAVE_RICH \
+            else _plain(f"elapsed {elapsed}")

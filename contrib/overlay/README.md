@@ -22,7 +22,7 @@ EOF
 
 # unmask the ~testing keyword, generate the Manifest, then merge
 echo "app-admin/gentoo-updater ~amd64" | sudo tee /etc/portage/package.accept_keywords/gentoo-updater
-sudo ebuild "$PWD/contrib/overlay/app-admin/gentoo-updater/gentoo-updater-0.2.0.ebuild" manifest
+sudo ebuild "$PWD/contrib/overlay/app-admin/gentoo-updater/gentoo-updater-0.2.1.ebuild" manifest
 sudo emerge -av app-admin/gentoo-updater
 
 # with the live dashboard:
