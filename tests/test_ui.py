@@ -41,12 +41,12 @@ class InactiveWithoutTty(unittest.TestCase):
     def test_lifecycle_is_a_noop_and_does_not_start_a_spinner(self):
         ui.begin_run(["preflight", "sync", "apply"])
         self.assertFalse(ui._active)
-        self.assertIsNone(ui._status)
+        self.assertIsNone(ui._anim_thread)  # no animator thread without a tty
         ui.phase_start("preflight")
         ui.phase_done(PhaseResult("preflight", ok=True, detail="ok"))
         with ui.suspend():  # must not raise, must not start a spinner
             pass
-        self.assertIsNone(ui._status)
+        self.assertIsNone(ui._anim_thread)
 
     def test_end_run_resets_state(self):
         ui.begin_run(["preflight"])

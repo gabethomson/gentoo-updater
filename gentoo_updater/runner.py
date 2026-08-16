@@ -74,12 +74,10 @@ class CommandRunner:
         _log.debug("capture: %s", " ".join(full))
         start = time.time()
         try:
-            # Drop the spinner while the child runs, same as stream(): a live
-            # refresh thread competing with a long subprocess is asking for
-            # trouble, and it lets the child own the terminal if it wants stdin.
-            with ui.suspend():
-                proc = subprocess.run(full, capture_output=True, text=True,
-                                      check=False, env=_c_locale_env())
+            # No suspend() here: capture uses pipes, so the child never touches
+            # the terminal and the spinner can keep animating over the wait.
+            proc = subprocess.run(full, capture_output=True, text=True,
+                                  check=False, env=_c_locale_env())
         except FileNotFoundError as exc:
             _log.debug("capture: %s -> not found", full[0])
             return CommandResult(returncode=127, stderr=str(exc))
