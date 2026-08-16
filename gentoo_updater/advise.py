@@ -125,6 +125,36 @@ def parse_glsa_ids(text: str) -> list[str]:
     return ids
 
 
+# --- depclean (orphan removal) ------------------------------------------
+
+# An unmerge-candidate line in `emerge --depclean -p` is a bare cat/pkg atom at
+# column 0-1; the follow-up "selected:"/"protected:" detail lines are indented
+# and slash-free, so they don't match.
+_DEPCLEAN_ATOM = re.compile(r"^ ?([a-z0-9]+(?:-[a-z0-9]+)*)/[a-z0-9][a-z0-9+_.-]*\s*$")
+_DEPCLEAN_COUNT = re.compile(r"Number (?:to remove|removed):\s*(\d+)")
+
+
+def parse_depclean_count(text: str) -> int:
+    """How many packages `emerge --depclean --pretend` would remove.
+
+    Prefers portage's own "Number to remove: N" line when present; otherwise
+    counts atom lines under the "would be unmerged" header. Returns 0 when
+    nothing is removable (or the output is unrecognised)."""
+    for line in text.splitlines():
+        m = _DEPCLEAN_COUNT.search(line)
+        if m:
+            return int(m.group(1))
+    in_block = False
+    count = 0
+    for line in text.splitlines():
+        if "would be unmerged" in line:
+            in_block = True
+            continue
+        if in_block and _DEPCLEAN_ATOM.match(line):
+            count += 1
+    return count
+
+
 # --- elog (post-merge messages) -----------------------------------------
 
 # elog filenames look like: cat:pkg-version:YYYYMMDD-HHMMSS.log

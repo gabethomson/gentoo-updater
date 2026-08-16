@@ -1,0 +1,8 @@
+#!/bin/sh
+# gentoo-updater cron job.
+#
+# For OpenRC (or any init using a cron daemon): copy to
+# /etc/cron.daily/gentoo-updater and `chmod +x` it. Use cron.weekly/cron.monthly
+# for a different cadence. Requires a running cron daemon (e.g. cronie).
+# `gup install-schedule --init openrc` does this for you.
+exec gup -y --no-sudo

@@ -23,6 +23,8 @@ _LINE = re.compile(
         (?P<flags>[^\]]*)                          # N/R/U/D/etc + keyword marks
         \]\s+
         (?P<atom>[^\s]+)                           # category/name-version[:slot][::repo]
+        (?:\s+\[(?P<oldver>[0-9][^\]]*)\])?         # emerge -v prints the installed
+                                                    # version in brackets for upgrades
     """,
     re.VERBOSE,
 )
@@ -41,6 +43,7 @@ class PkgChange:
     is_rebuild: bool
     needs_keyword: bool  # the '~' marker -- testing keyword required
     from_binary: bool
+    old_version: str = ""  # installed version being replaced (upgrades only)
 
 
 @dataclass
@@ -115,6 +118,7 @@ def parse_pretend(text: str, *, high_risk_atoms: tuple[str, ...] = ()) -> Preten
             is_rebuild="R" in flags or "r" in flags,
             needs_keyword="~" in flags,
             from_binary=(kind == "binary"),
+            old_version=(m.group("oldver") or "").strip(),
         )
         plan.changes.append(change)
 

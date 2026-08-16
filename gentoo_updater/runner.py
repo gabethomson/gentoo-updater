@@ -58,14 +58,32 @@ class CommandRunner:
 
     @staticmethod
     def _needs_root(cmd: list[str]) -> bool:
+        """Whether a command both needs root AND mutates the system.
+
+        This single predicate drives two things: prepending sudo, and the
+        --dry-run guard (a command that mutates is exactly one we must not run
+        in a dry run). It is deliberately subcommand-aware so that read-only
+        introspection -- `emerge --pretend`, `snapper list`, `find` -- is
+        neither sudo'd nor suppressed under --dry-run, while the mutating
+        siblings (`snapper create`, `btrfs subvolume snapshot`, `mkdir`) are.
+        """
         prog = cmd[0]
         # emerge needs root unless it's a pretend/search invocation
         if prog == "emerge":
             readonly = {"-p", "--pretend", "-s", "--search", "-S", "--searchdesc"}
             return not any(a in readonly for a in cmd)
-        if prog in ("emaint", "dispatch-conf", "revdep-rebuild", "eix-update"):
+        if prog in ("emaint", "dispatch-conf", "revdep-rebuild", "eix-update",
+                    "mkdir"):
             return True
-        # eselect news read/count is fine as user; snapshot mgr handles its own sudo
+        # snapshot backends: only the state-changing subcommands mutate. Listing
+        # and config discovery must still run under --dry-run so `gup --dry-run`
+        # and `gup rollback` can see the real snapshot state.
+        if prog == "snapper":
+            return any(sub in cmd for sub in ("create", "rollback", "delete",
+                                              "modify"))
+        if prog == "btrfs":
+            return "snapshot" in cmd or "delete" in cmd
+        # eselect news read/count and find/findmnt are safe as an unprivileged user
         return False
 
     def capture(self, cmd: list[str]) -> CommandResult:
@@ -89,7 +107,10 @@ class CommandRunner:
             return CommandResult(returncode=0)
         ui.dim(f"$ {' '.join(full)}")
         try:
-            proc = subprocess.run(full, check=False)
+            # Hand the terminal to the child: drop the live panel (if any) so its
+            # output isn't fighting a pinned dashboard, then restore it after.
+            with ui.suspend():
+                proc = subprocess.run(full, check=False)
             return CommandResult(proc.returncode)
         except FileNotFoundError as exc:
             return CommandResult(returncode=127, stderr=str(exc))

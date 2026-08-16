@@ -13,10 +13,13 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 
+from . import __version__
 from .runner import CommandRunner, CommandResult
 from .parse import parse_pretend, PretendPlan
 from .snapshot import SnapshotManager
 from . import advise
+from . import audit as _audit
+from . import picker
 from . import ui
 
 # Where portage writes per-package elog messages (elog:save module). We surface
@@ -52,6 +55,18 @@ HIGH_RISK_ATOMS = (
 )
 
 
+def _pkg_label(change) -> str:
+    """One-line checklist label for a pending package: 'U cat/pkg  old → new'."""
+    tag = ("N" if change.is_new else "U" if change.is_upgrade
+           else "R" if change.is_rebuild else " ")
+    core = change.atom.split("::", 1)[0]
+    prefix = change.name + "-"
+    ver = core[len(prefix):] if core.startswith(prefix) else core
+    if change.old_version:
+        return f"{tag}  {change.name}  {change.old_version} → {ver}"
+    return f"{tag}  {change.name}  {ver}"
+
+
 @dataclass
 class PhaseResult:
     name: str
@@ -85,11 +100,30 @@ class Updater:
         *,
         interactive: bool = True,
         assume_yes: bool = False,
+        low_space_gib: float = LOW_SPACE_GIB,
+        include_depclean: bool = False,
+        select: bool = False,
+        selector=None,
+        audit_log=None,
+        notifier=None,
     ):
         self.run = runner
         self.snapshots = snapshots
         self.interactive = interactive
         self.assume_yes = assume_yes
+        self.low_space_gib = low_space_gib
+        self.include_depclean = include_depclean
+        # Interactive package selection (`--select`): pick which pending packages
+        # to update; the rest become `emerge --exclude` atoms. `selector` is
+        # injectable for tests; it takes [(name, label)] and returns the checked
+        # names (or None to cancel).
+        self.select = select
+        self.selector = selector or picker.pick
+        self._excludes: list[str] = []
+        # Optional side-channels: an audit-log writer and a notifier. Injected so
+        # tests can supply fakes (or None to disable). See audit.py / notify.py.
+        self.audit_log = audit_log
+        self.notifier = notifier
         self.report = UpdateReport()
         # Wall-clock start, used to find elog files written during this run.
         self._started = time.time()
@@ -123,9 +157,9 @@ class Updater:
         space = ""
         if free is not None:
             space = f"; build space: {free:.1f} GiB free"
-            if free < LOW_SPACE_GIB:
+            if free < self.low_space_gib:
                 ui.warn(f"Only {free:.1f} GiB free in the portage build dir "
-                        f"(< {LOW_SPACE_GIB:.0f} GiB). A large source build may fail.")
+                        f"(< {self.low_space_gib:.0f} GiB). A large source build may fail.")
         return PhaseResult("preflight", ok=True,
                            detail=f"optional tools: {note}{space}")
 
@@ -186,12 +220,18 @@ class Updater:
             self.run.stream(["eix-update"])
         return PhaseResult("sync", ok=True, detail="all repos synced")
 
+    @staticmethod
+    def _pretend_cmd(excludes: list[str] | None = None) -> list[str]:
+        cmd = ["emerge", "--pretend", "--verbose", "--update",
+               "--deep", "--newuse", "--with-bdeps=y", "@world"]
+        if excludes:
+            # --exclude takes one space-separated list of cat/pkg atoms.
+            cmd += ["--exclude", " ".join(excludes)]
+        return cmd
+
     def phase_plan(self) -> PhaseResult:
         """Dry-run the world update and parse what it intends to do."""
-        res = self.run.capture(
-            ["emerge", "--pretend", "--verbose", "--update",
-             "--deep", "--newuse", "--with-bdeps=y", "@world"]
-        )
+        res = self.run.capture(self._pretend_cmd())
         # emerge --pretend returns 0 normally; nonzero can mean blockers or
         # unsatisfied deps that need config changes first.
         plan = parse_pretend(res.stdout, high_risk_atoms=HIGH_RISK_ATOMS)
@@ -217,11 +257,66 @@ class Updater:
         if plan.total == 0:
             return PhaseResult("plan", ok=True, detail="nothing to update")
 
+        # Optional interactive cherry-pick: uncheck packages to skip this run.
+        if self.select and self.interactive:
+            selected = self._apply_selection(plan)
+            if selected is not None:
+                return selected  # selection re-planned; use its result
+
         if plan.high_risk:
             ui.warn("This update touches high-risk packages: "
                     + ", ".join(sorted(plan.high_risk)))
         return PhaseResult("plan", ok=True,
                            detail=f"{plan.total} package(s) pending")
+
+    def _selectable_items(self, plan: PretendPlan) -> list[tuple[str, str]]:
+        """(name, label) rows for the picker, one per distinct package."""
+        items: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for c in plan.changes:
+            if c.name in seen:
+                continue
+            seen.add(c.name)
+            items.append((c.name, _pkg_label(c)))
+        return items
+
+    def _apply_selection(self, plan: PretendPlan) -> PhaseResult | None:
+        """Run the picker; if anything was unchecked, re-pretend with --exclude
+        and return the new plan result. Returns None when the selection is a
+        no-op (kept all, or cancelled) so the caller proceeds normally."""
+        items = self._selectable_items(plan)
+        checked = self.selector(items)
+        if checked is None:
+            ui.info("Selection cancelled -- keeping all packages.")
+            return None
+        checked_set = set(checked)
+        excludes = [name for name, _ in items if name not in checked_set]
+        if not excludes:
+            return None  # nothing unchecked
+
+        self._excludes = excludes
+        ui.info(f"Excluding {len(excludes)} package(s): " + ", ".join(excludes))
+        res = self.run.capture(self._pretend_cmd(excludes))
+        plan2 = parse_pretend(res.stdout, high_risk_atoms=HIGH_RISK_ATOMS)
+        self.report.plan = plan2
+
+        if res.returncode != 0:
+            ui.error("Excluding those packages breaks dependency resolution.")
+            ui.hint("Something you kept needs one you skipped. Re-run and keep "
+                    "it, or resolve the conflict by hand.")
+            ui.show_plan(plan2)
+            return PhaseResult("plan", ok=False,
+                               detail="exclusion caused a dependency conflict")
+
+        ui.show_plan(plan2)
+        if plan2.total == 0:
+            return PhaseResult("plan", ok=True,
+                               detail="all pending packages were excluded")
+        if plan2.high_risk:
+            ui.warn("Still touches high-risk packages: "
+                    + ", ".join(sorted(plan2.high_risk)))
+        return PhaseResult("plan", ok=True,
+                           detail=f"{plan2.total} pending after exclusions")
 
     def phase_glsa(self) -> PhaseResult:
         """Check for known security advisories (GLSAs) affecting the system.
@@ -302,6 +397,9 @@ class Updater:
 
         cmd = ["emerge", "--update", "--deep", "--newuse",
                "--with-bdeps=y", "--keep-going", "@world"]
+        if self._excludes:
+            # Apply the same exclusions the user picked at the plan step.
+            cmd += ["--exclude", " ".join(self._excludes)]
         res = self.run.stream(cmd)
         if res.returncode != 0:
             ui.error("emerge @world exited non-zero. Some packages may have failed.")
@@ -340,6 +438,31 @@ class Updater:
                 return PhaseResult("config", ok=True, detail="dispatch-conf run")
         ui.warn(f"{pending} config file update(s) pending -- run 'dispatch-conf'.")
         return PhaseResult("config", ok=True, detail=f"{pending} pending (deferred)")
+
+    def phase_depclean(self) -> PhaseResult:
+        """Remove orphaned packages (not required by @world), opt-in and careful.
+
+        Always pretends first and shows the count. Removal is gated on an
+        explicit confirmation because depclean can drop packages you actually
+        want but never added to @world. `emerge --depclean` itself refuses
+        removals that would break reverse dependencies."""
+        res = self.run.capture(["emerge", "--depclean", "--pretend"])
+        removable = advise.parse_depclean_count(res.stdout)
+        if removable == 0:
+            return PhaseResult("depclean", ok=True, detail="no orphaned packages")
+
+        ui.warn(f"{removable} orphaned package(s) could be removed by depclean.")
+        ui.hint("Review carefully: depclean removes anything not pulled in by "
+                "@world. List it with 'emerge --depclean --pretend'.")
+        if not self._confirm("Run 'emerge --depclean' now?", default=False):
+            return PhaseResult("depclean", ok=True,
+                               detail=f"{removable} removable (deferred)")
+
+        r = self.run.stream(["emerge", "--depclean"])
+        if r.returncode != 0:
+            return PhaseResult("depclean", ok=False, detail="depclean failed")
+        return PhaseResult("depclean", ok=True,
+                           detail=f"removed up to {removable} package(s)")
 
     def phase_verify(self) -> PhaseResult:
         """Post-update health checks that don't change anything."""
@@ -389,30 +512,63 @@ class Updater:
             ("apply", self.phase_apply, True),
             ("config", self.phase_config, True),
             ("post-update", self.phase_postupdate, True),
+        ]
+        # depclean is opt-in; only add it to the pipeline when enabled, so the
+        # common run doesn't carry a noisy "skipped" row for a feature that's off.
+        if self.include_depclean:
+            sequence.append(("depclean", self.phase_depclean, True))
+        sequence += [
             ("elog", self.phase_elog, True),
             ("verify", self.phase_verify, True),
         ]
 
-        for name, fn, enabled in sequence:
-            if not enabled:
-                self.report.add(PhaseResult(name, ok=True, skipped=True,
-                                            detail="skipped by flag"))
-                continue
+        ui.begin_run([name for name, _, _ in sequence])
+        try:
+            for name, fn, enabled in sequence:
+                ui.phase_start(name)
+                if not enabled:
+                    skipped = PhaseResult(name, ok=True, skipped=True,
+                                          detail="skipped by flag")
+                    self.report.add(skipped)
+                    ui.phase_done(skipped)
+                    continue
 
-            ui.phase_header(name)
-            result = fn()
-            self.report.add(result)
+                ui.phase_header(name)
+                result = fn()
+                self.report.add(result)
+                ui.phase_done(result)
 
-            if not result.ok and not result.skipped:
-                # Fatal phases stop the run. 'plan' failing means we never
-                # apply; 'apply' failing means we still run verify to report.
-                if name in ("preflight", "news", "sync", "plan", "snapshot"):
-                    ui.error(f"Phase '{name}' failed: {result.detail}. Stopping.")
-                    break
+                if not result.ok and not result.skipped:
+                    # Fatal phases stop the run. 'plan' failing means we never
+                    # apply; 'apply' failing means we still run verify to report.
+                    if name in ("preflight", "news", "sync", "plan", "snapshot"):
+                        ui.error(f"Phase '{name}' failed: {result.detail}. Stopping.")
+                        break
+        finally:
+            self._compute_reboot_advice()
+            ui.end_run(self.report)
 
-        self._compute_reboot_advice()
-        ui.show_summary(self.report)
+        self._finalize(command="update")
         return self.report
+
+    def _finalize(self, *, command: str) -> None:
+        """Best-effort side-channels after a run: audit trail + notification.
+        Neither is allowed to raise into the caller -- the update already
+        happened; recording it is secondary."""
+        if self.audit_log is not None:
+            try:
+                record = _audit.build_record(
+                    self.report, started=self._started, finished=time.time(),
+                    version=__version__, command=command,
+                )
+                self.audit_log.record(record)
+            except Exception as exc:  # noqa: BLE001 - never fail a run over logging
+                ui.dim(f"(audit log skipped: {exc})")
+        if self.notifier is not None:
+            try:
+                self.notifier.maybe_notify(self.report, command=command)
+            except Exception as exc:  # noqa: BLE001 - notifications are best-effort
+                ui.dim(f"(notification skipped: {exc})")
 
     def _compute_reboot_advice(self) -> None:
         """If the applied update touched kernel/glibc/systemd/dbus, record that a
@@ -424,6 +580,21 @@ class Updater:
             return
         names = [c.name for c in self.report.plan.changes]
         self.report.reboot_pkgs = advise.packages_needing_reboot(names)
+
+    def run_depclean(self) -> int:
+        """Standalone `gup depclean`: preflight, then the depclean phase only."""
+        pre = self.phase_preflight()
+        self.report.add(pre)
+        if not pre.ok:
+            ui.error(f"Preflight failed: {pre.detail}")
+            ui.show_summary(self.report)
+            return 1
+        ui.phase_header("depclean")
+        result = self.phase_depclean()
+        self.report.add(result)
+        ui.show_summary(self.report)
+        self._finalize(command="depclean")
+        return 0 if result.ok else 1
 
     # -- rollback --------------------------------------------------------
 

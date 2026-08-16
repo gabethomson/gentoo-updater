@@ -1,0 +1,12 @@
+#!/bin/sh
+# gentoo-updater runit service.
+#
+# For runit: place as /etc/sv/gentoo-updater/run (chmod +x), then symlink the
+# service dir into your runsvdir, e.g. `ln -s /etc/sv/gentoo-updater /var/service/`.
+# runit has no timer, so this is the idiomatic "run then sleep" loop.
+# `gup install-schedule --init runit` does this for you.
+exec 2>&1
+while true; do
+    gup -y --no-sudo
+    sleep 86400
+done

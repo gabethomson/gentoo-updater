@@ -1,0 +1,27 @@
+# gentoo-updater configuration.
+#
+# Copy to /etc/gentoo-updater.toml (system-wide) or
+# ~/.config/gentoo-updater/config.toml (per-user). Keys may sit at the top
+# level or under a [gentoo-updater] table. Command-line flags override these.
+# Every key is optional; unset keys use the built-in default shown below.
+
+# --- behaviour ---
+# yes            = false   # unattended: assume yes, apply automatically
+# non_interactive = false  # never prompt (does not auto-apply unless yes = true)
+# no_snapshot    = false   # skip the pre-update snapshot
+# no_sync        = false   # skip repository sync
+# no_sudo        = false   # already root; don't prepend sudo
+# depclean       = false   # include a depclean step (still asks before removing)
+# select         = false   # interactively cherry-pick packages to update
+
+# --- thresholds ---
+# low_space_gib  = 5.0     # warn below this much free space in the build dir
+
+# --- notifications ---   trigger: never | failure | reboot | always
+# notify         = "never"
+# notify_desktop = true            # use notify-send when notifying
+# notify_email   = ""              # e.g. "root@localhost"; empty disables email
+
+# --- audit trail ---
+# audit          = true            # append one JSONL record per run
+# audit_path     = ""              # empty -> /var/log/gentoo-updater/history.jsonl

@@ -7,17 +7,45 @@ user-facing output goes through here so the styling is consistent and testable.
 
 from __future__ import annotations
 
+import contextlib
 import sys
+import time
 
 try:
-    from rich.console import Console
+    from rich.console import Console, Group
     from rich.table import Table
     from rich.prompt import Confirm
+    from rich.panel import Panel
+    from rich.spinner import Spinner
+    from rich.text import Text
+    from rich.live import Live
     _console: "Console | None" = Console()
     _HAVE_RICH = True
 except Exception:  # noqa: BLE001 - rich is optional
     _console = None
     _HAVE_RICH = False
+
+
+# -- live dashboard state ------------------------------------------------
+#
+# When rich is present and we're on a real terminal, run_all drives a pinned
+# "live" panel showing the phase checklist. It's module-level state (rather than
+# an object) because both the updater and the runner talk to ui, and the runner
+# needs `suspend()` to step the panel aside while a subprocess streams.
+_PLAIN = False              # user forced plain output (--plain)
+_live: "Live | None" = None
+_phases: list[dict] = []    # [{"name", "status", "detail"}]
+_run_start: float = 0.0
+
+
+def set_plain(plain: bool) -> None:
+    """Force plain (non-dashboard) output regardless of terminal/rich."""
+    global _PLAIN
+    _PLAIN = plain
+
+
+def _dashboard_wanted() -> bool:
+    return _HAVE_RICH and not _PLAIN and sys.stdout.isatty()
 
 
 # -- basic messages ------------------------------------------------------
@@ -62,6 +90,10 @@ def hint(msg: str) -> None:
 
 
 def phase_header(name: str) -> None:
+    # The live dashboard already shows which phase is running, so the rule would
+    # just be noise -- skip it while the panel is up.
+    if _live is not None:
+        return
     label = f" {name.upper()} "
     if _HAVE_RICH:
         _console.rule(f"[bold]{label}[/bold]")
@@ -72,20 +104,22 @@ def phase_header(name: str) -> None:
 # -- prompts -------------------------------------------------------------
 
 def confirm(prompt: str, *, default: bool = False) -> bool:
-    if _HAVE_RICH:
+    # A prompt needs the terminal to itself, so drop the live panel while we ask.
+    with suspend():
+        if _HAVE_RICH:
+            try:
+                return Confirm.ask(prompt, default=default)
+            except (EOFError, KeyboardInterrupt):
+                return False
+        # plain fallback
+        suffix = " [Y/n] " if default else " [y/N] "
         try:
-            return Confirm.ask(prompt, default=default)
+            ans = input(prompt + suffix).strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
-    # plain fallback
-    suffix = " [Y/n] " if default else " [y/N] "
-    try:
-        ans = input(prompt + suffix).strip().lower()
-    except (EOFError, KeyboardInterrupt):
-        return False
-    if not ans:
-        return default
-    return ans in ("y", "yes")
+        if not ans:
+            return default
+        return ans in ("y", "yes")
 
 
 # -- structured views ----------------------------------------------------
@@ -216,3 +250,112 @@ def show_summary(report) -> None:
             _plain("Reboot recommended -- updated: " + ", ".join(report.reboot_pkgs))
         _plain("Run completed with failures." if report.failed
                else "Run completed successfully.")
+
+
+# -- live dashboard ------------------------------------------------------
+
+_GLYPH = {  # non-running states; the running phase gets an animated spinner
+    "ok": ("[green]OK[/green]", ""),
+    "fail": ("[red]XX[/red]", "bold red"),
+    "skip": ("[dim]--[/dim]", "dim"),
+    "pending": ("[dim]..[/dim]", "dim"),
+}
+
+
+def _fmt(seconds: float) -> str:
+    s = int(max(0, seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    return f"{h:d}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
+
+
+def _render_dashboard():
+    """Build the pinned panel from current phase state (rich only)."""
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column(width=2, justify="center")
+    grid.add_column(no_wrap=True)
+    grid.add_column(overflow="fold")
+    for row in _phases:
+        status = row["status"]
+        if status == "running":
+            marker = Spinner("dots", style="cyan")
+            name = Text(row["name"], style="bold cyan")
+        else:
+            glyph, name_style = _GLYPH.get(status, _GLYPH["pending"])
+            marker = Text.from_markup(glyph)
+            name = Text(row["name"], style=name_style)
+        grid.add_row(marker, name, Text(row.get("detail", ""), style="dim"))
+    footer = Text(f"elapsed {_fmt(time.time() - _run_start)}", style="dim")
+    return Panel(Group(grid, footer), title="gentoo-updater",
+                 title_align="left", border_style="cyan", padding=(0, 1))
+
+
+def _new_live() -> "Live":
+    # transient so that stepping aside (suspend) cleanly erases the panel, and so
+    # the final summary -- not a frozen checklist -- is what stays on screen.
+    return Live(get_renderable=_render_dashboard, console=_console,
+                refresh_per_second=12, transient=True,
+                vertical_overflow="visible")
+
+
+def begin_run(phase_names: list[str]) -> None:
+    """Start the live dashboard for a pipeline run (no-op in plain mode)."""
+    global _live, _phases, _run_start
+    _phases = [{"name": n, "status": "pending", "detail": ""} for n in phase_names]
+    _run_start = time.time()
+    if not _dashboard_wanted():
+        _live = None
+        return
+    _live = _new_live()
+    _live.start()
+
+
+def _row(name: str) -> "dict | None":
+    return next((r for r in _phases if r["name"] == name), None)
+
+
+def phase_start(name: str) -> None:
+    row = _row(name)
+    if row is not None:
+        row["status"] = "running"
+    if _live is not None:
+        _live.refresh()
+
+
+def phase_done(result) -> None:
+    row = _row(result.name)
+    if row is not None:
+        row["status"] = ("skip" if result.skipped
+                         else "ok" if result.ok else "fail")
+        row["detail"] = result.detail
+    if _live is not None:
+        _live.refresh()
+
+
+@contextlib.contextmanager
+def suspend():
+    """Temporarily tear down the live panel so a subprocess (or prompt) can own
+    the terminal, then bring it back. A no-op when the dashboard isn't active."""
+    global _live
+    if _live is None:
+        yield
+        return
+    _live.stop()
+    _live = None
+    try:
+        yield
+    finally:
+        # Only resume if the run hasn't been finalized in the meantime.
+        if _phases and any(r["status"] in ("pending", "running") for r in _phases):
+            _live = _new_live()
+            _live.start()
+
+
+def end_run(report) -> None:
+    """Stop the dashboard and print the persistent end-of-run summary."""
+    global _live, _phases
+    if _live is not None:
+        _live.stop()
+        _live = None
+    _phases = []
+    show_summary(report)

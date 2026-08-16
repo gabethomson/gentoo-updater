@@ -100,10 +100,13 @@ def _which_stub(present):
 
 
 def make_updater(handler=_happy_handler, *, snapshots_available=False,
-                 snapshots=None, interactive=False, assume_yes=True):
+                 snapshots=None, interactive=False, assume_yes=True,
+                 include_depclean=False, select=False, selector=None):
     runner = FakeRunner(handler)
     snaps = FakeSnapshots(available=snapshots_available, snapshots=snapshots)
-    updater = Updater(runner, snaps, interactive=interactive, assume_yes=assume_yes)
+    updater = Updater(runner, snaps, interactive=interactive, assume_yes=assume_yes,
+                      include_depclean=include_depclean, select=select,
+                      selector=selector)
     return updater, runner
 
 
@@ -302,6 +305,207 @@ class RunAllPipeline(unittest.TestCase):
         self.assertEqual(report.reboot_pkgs, [])
 
 
+DEPCLEAN_PRETEND = (
+    ">>> These are the packages that would be unmerged:\n\n"
+    " app-misc/foo\n"
+    "    selected: 1.0\n"
+    "    protected: none\n\n"
+    " dev-libs/bar\n"
+    "    selected: 2.0\n\n"
+)
+
+
+class DepcleanPhase(unittest.TestCase):
+    def test_absent_from_default_pipeline(self):
+        updater, _ = make_updater()
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+        self.assertNotIn("depclean", _phase_names(report))
+
+    def test_included_and_removes_when_enabled_and_confirmed(self):
+        def handler(cmd):
+            if cmd[:2] == ["emerge", "--depclean"] and "--pretend" in cmd:
+                return CommandResult(0, stdout=DEPCLEAN_PRETEND)
+            return _happy_handler(cmd)
+
+        updater, runner = make_updater(handler, include_depclean=True,
+                                       assume_yes=True)
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+
+        self.assertIn("depclean", _phase_names(report))
+        self.assertTrue(_phase(report, "depclean").ok)
+        # assume_yes -> confirmed -> the real (non-pretend) depclean was issued
+        self.assertTrue(
+            any(c[:2] == ["emerge", "--depclean"] and "--pretend" not in c
+                for c in runner.calls),
+            "expected a real 'emerge --depclean' after confirmation",
+        )
+
+    def test_no_orphans_does_not_remove(self):
+        # default handler returns empty stdout for depclean pretend -> 0 removable
+        updater, runner = make_updater(include_depclean=True)
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+        self.assertIn("no orphaned", _phase(report, "depclean").detail)
+        self.assertFalse(
+            any(c[:2] == ["emerge", "--depclean"] and "--pretend" not in c
+                for c in runner.calls),
+            "nothing removable -> no real depclean",
+        )
+
+    def test_deferred_when_declined(self):
+        def handler(cmd):
+            if cmd[:2] == ["emerge", "--depclean"] and "--pretend" in cmd:
+                return CommandResult(0, stdout=DEPCLEAN_PRETEND)
+            return _happy_handler(cmd)
+
+        # interactive=False, assume_yes=False -> _confirm returns default (False)
+        updater, runner = make_updater(handler, include_depclean=True,
+                                       interactive=False, assume_yes=False)
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+        self.assertIn("deferred", _phase(report, "depclean").detail)
+        self.assertFalse(
+            any(c[:2] == ["emerge", "--depclean"] and "--pretend" not in c
+                for c in runner.calls))
+
+
+PRETEND_THREE = (
+    "These are the packages that would be merged, in order:\n\n"
+    "[ebuild     U  ] app-editors/vim-9.1.0 [9.0.1]  0 KiB\n"
+    "[ebuild     U  ] sys-libs/glibc-2.40 [2.39]  0 KiB\n"
+    "[ebuild     U  ] dev-lang/python-3.14 [3.13]  0 KiB\n"
+    "Total: 3 packages, Size of downloads: 0 KiB\n"
+)
+PRETEND_TWO = (
+    "[ebuild     U  ] app-editors/vim-9.1.0 [9.0.1]  0 KiB\n"
+    "[ebuild     U  ] dev-lang/python-3.14 [3.13]  0 KiB\n"
+    "Total: 2 packages, Size of downloads: 0 KiB\n"
+)
+
+
+def _apply_call(runner):
+    return next((c for c in runner.calls
+                 if c[:1] == ["emerge"] and "@world" in c
+                 and "--pretend" not in c), None)
+
+
+class SelectPackages(unittest.TestCase):
+    def _handler(self, two=PRETEND_TWO, exclude_rc=0):
+        def handler(cmd):
+            if cmd[:2] == ["emerge", "--pretend"]:
+                if "--exclude" in cmd:
+                    return CommandResult(exclude_rc, stdout=two)
+                return CommandResult(0, stdout=PRETEND_THREE)
+            return _happy_handler(cmd)
+        return handler
+
+    def test_unchecking_excludes_from_replan_and_apply(self):
+        # selector unchecks glibc (keeps the other two)
+        selector = lambda items: [n for n, _ in items if n != "sys-libs/glibc"]
+        updater, runner = make_updater(
+            self._handler(), interactive=True, assume_yes=True,
+            select=True, selector=selector)
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+
+        self.assertFalse(report.failed)
+        # a re-pretend with --exclude was issued
+        self.assertTrue(any(c[:2] == ["emerge", "--pretend"] and "--exclude" in c
+                            for c in runner.calls))
+        # the real apply carries the same exclusion
+        apply_cmd = _apply_call(runner)
+        self.assertIsNotNone(apply_cmd)
+        self.assertIn("--exclude", apply_cmd)
+        self.assertEqual(apply_cmd[apply_cmd.index("--exclude") + 1],
+                         "sys-libs/glibc")
+        # the report reflects the post-exclusion plan (2 packages)
+        self.assertEqual(report.plan.total, 2)
+
+    def test_keeping_all_adds_no_exclusion(self):
+        selector = lambda items: [n for n, _ in items]  # nothing unchecked
+        updater, runner = make_updater(
+            self._handler(), interactive=True, assume_yes=True,
+            select=True, selector=selector)
+        with _quiet(), env(BASE_TOOLS):
+            updater.run_all()
+        self.assertFalse(any("--exclude" in c for c in runner.calls))
+        self.assertIn("@world", _apply_call(runner))
+
+    def test_cancel_keeps_all(self):
+        selector = lambda items: None  # user hit 'q'
+        updater, runner = make_updater(
+            self._handler(), interactive=True, assume_yes=True,
+            select=True, selector=selector)
+        with _quiet(), env(BASE_TOOLS):
+            updater.run_all()
+        self.assertFalse(any("--exclude" in c for c in runner.calls))
+
+    def test_exclusion_conflict_is_fatal_and_stops_before_apply(self):
+        # re-pretend with --exclude fails -> plan phase fails -> no apply
+        selector = lambda items: [n for n, _ in items if n != "sys-libs/glibc"]
+        updater, runner = make_updater(
+            self._handler(exclude_rc=1), interactive=True, assume_yes=True,
+            select=True, selector=selector)
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+        self.assertTrue(report.failed)
+        self.assertFalse(_phase(report, "plan").ok)
+        self.assertIsNone(_apply_call(runner))
+
+    def test_selector_not_called_without_select_flag(self):
+        called = []
+        selector = lambda items: called.append(1) or [n for n, _ in items]
+        updater, _ = make_updater(
+            self._handler(), interactive=True, assume_yes=True,
+            select=False, selector=selector)
+        with _quiet(), env(BASE_TOOLS):
+            updater.run_all()
+        self.assertEqual(called, [])
+
+
+class AuditAndNotify(unittest.TestCase):
+    def test_finalize_records_audit_and_notifies(self):
+        recorded = []
+        notified = []
+
+        class FakeAudit:
+            def record(self, entry):
+                recorded.append(entry)
+                return "/tmp/history.jsonl"
+
+        class FakeNotifier:
+            def maybe_notify(self, report, *, command="update"):
+                notified.append(command)
+                return ["desktop"]
+
+        runner = FakeRunner(_happy_handler)
+        snaps = FakeSnapshots()
+        updater = Updater(runner, snaps, interactive=False, assume_yes=True,
+                          audit_log=FakeAudit(), notifier=FakeNotifier())
+        with _quiet(), env(BASE_TOOLS):
+            updater.run_all()
+
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["command"], "update")
+        self.assertIn("phases", recorded[0])
+        self.assertEqual(notified, ["update"])
+
+    def test_audit_failure_does_not_break_the_run(self):
+        class BoomAudit:
+            def record(self, entry):
+                raise OSError("disk full")
+
+        runner = FakeRunner(_happy_handler)
+        snaps = FakeSnapshots()
+        updater = Updater(runner, snaps, interactive=False, assume_yes=True,
+                          audit_log=BoomAudit())
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+        self.assertFalse(report.failed)  # logging blew up, run still fine
+
+
 class RollbackFlow(unittest.TestCase):
     def _snaps(self):
         from gentoo_updater.snapshot import SnapshotInfo
@@ -349,6 +553,41 @@ class RunnerDryRun(unittest.TestCase):
         with mock.patch("gentoo_updater.runner.subprocess.run", fake), _quiet():
             runner.capture(["emerge", "--pretend", "@world"])
         fake.assert_called_once()
+
+    def test_dry_run_guards_snapshot_creation(self):
+        # snapshot *creation* mutates the system, so --dry-run must not run it.
+        runner = CommandRunner(dry_run=True, use_sudo=False)
+        with mock.patch("gentoo_updater.runner.subprocess.run") as sp, _quiet():
+            r1 = runner.capture(["btrfs", "subvolume", "snapshot", "-r", "/", "/d"])
+            r2 = runner.capture(["snapper", "-c", "root", "create", "--print-number"])
+            r3 = runner.capture(["mkdir", "-p", "/.snapshots"])
+        sp.assert_not_called()
+        for r in (r1, r2, r3):
+            self.assertEqual(r.returncode, 0)
+
+    def test_dry_run_still_lists_snapshots(self):
+        # listing/detection is read-only, so it must really run even in dry-run
+        # (otherwise `gup rollback --dry-run` would see no snapshots).
+        runner = CommandRunner(dry_run=True, use_sudo=False)
+        fake = mock.Mock(return_value=mock.Mock(returncode=0, stdout="", stderr=""))
+        with mock.patch("gentoo_updater.runner.subprocess.run", fake), _quiet():
+            runner.capture(["snapper", "-c", "root", "list"])
+            runner.capture(["find", "/.snapshots"])
+        self.assertEqual(fake.call_count, 2)
+
+    def test_snapshot_mutation_is_sudo_but_listing_is_not(self):
+        runner = CommandRunner(dry_run=False, use_sudo=True)
+        seen = []
+
+        def fake_run(cmd, **kw):
+            seen.append(cmd)
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("gentoo_updater.runner.subprocess.run", side_effect=fake_run):
+            runner.capture(["snapper", "-c", "root", "create", "--print-number"])
+            runner.capture(["snapper", "-c", "root", "list"])
+        self.assertEqual(seen[0][0], "sudo")       # create -> privileged
+        self.assertEqual(seen[1][0], "snapper")    # list   -> unprivileged
 
     def test_capture_pins_c_locale_for_parsed_output(self):
         runner = CommandRunner(dry_run=False, use_sudo=False)
