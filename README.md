@@ -67,14 +67,17 @@ pipx install git+https://github.com/gabethomson/gentoo-updater
 pipx install 'gentoo-updater[pretty] @ git+https://github.com/gabethomson/gentoo-updater'  # with rich
 ```
 
-**ebuild** — the Gentoo-native way, from the bundled overlay:
+**ebuild** — the Gentoo-native way, from the bundled overlay. A live `-9999`
+ebuild builds straight from `main` (no distfile, no Manifest), and there's a
+pinned release ebuild too:
 
 ```bash
-# add the overlay shipped in contrib/overlay, then:
-emerge -av app-admin/gentoo-updater
+# after adding the overlay (see contrib/overlay/README.md):
+echo "app-admin/gentoo-updater **" | sudo tee /etc/portage/package.accept_keywords/gentoo-updater
+sudo emerge -av =app-admin/gentoo-updater-9999
 ```
 
-See [`contrib/overlay/`](contrib/overlay/) for the ebuild.
+See [`contrib/overlay/`](contrib/overlay/) for full setup.
 
 The only optional dependency is `rich` (`dev-python/rich`) for colour, tables,
 and the live dashboard; without it the output is plain text.
