@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import shutil
 import sys
 import threading
 import time
@@ -37,6 +38,15 @@ _anim_stop: "threading.Event | None" = None
 
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# Pinned-dashboard state: the ordered phase list, each phase's (state, detail),
+# how many screen lines the block currently occupies (so we can move the cursor
+# up and redraw it in place), and the current spinner frame. All read/written
+# under _lock, same as the spinner fields above.
+_phases: "list[str]" = []
+_status: "dict[str, tuple[str, str]]" = {}
+_dash_lines = 0
+_frame = _FRAMES[0]
+
 
 def set_plain(plain: bool) -> None:
     global _PLAIN
@@ -48,14 +58,14 @@ def _dashboard_wanted() -> bool:
 
 
 def _emit(render) -> None:
-    """Run a print. When the spinner is up, clear its line first (under the lock)
-    so output never lands on top of it; the animator redraws below on its next
-    tick."""
+    """Run a print. When the dashboard is up, tear the pinned block down first
+    (under the lock) so the message scrolls into history above it, then redraw
+    the block below. When idle, just print."""
     if _active:
         with _lock:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
+            _clear_block_locked()
             render()
+            _repaint_locked()
     else:
         render()
 
@@ -253,14 +263,19 @@ def show_summary(report) -> None:
                else "Run completed successfully.")
 
 
-# -- live spinner --------------------------------------------------------
+# -- live dashboard ------------------------------------------------------
 #
 # run_all calls begin_run -> phase_start / phase_done* -> end_run; the runner
-# and picker wrap terminal-owning work in suspend(). The animator thread draws
-# one line for the running phase; each finished phase prints a permanent line.
-
-_MARK = {"ok": "[green]OK[/green]", "fail": "[red]XX[/red]",
-         "skip": "[dim]--[/dim]"}
+# and picker wrap terminal-owning work in suspend(). A background thread keeps a
+# checklist of every phase pinned to the bottom of the screen and redraws it in
+# place each tick, so the running phase animates and the clock ticks. Permanent
+# output (warnings, the plan table, the summary) scrolls above it via _emit.
+#
+# During a real merge the runner calls suspend(): the block is torn down so
+# emerge owns the terminal and its build output scrolls freely, then the block
+# is repainted below that output when the phase returns. That hand-off is why
+# this is a pinned checklist and not a full-screen frame -- we never fight the
+# child for the terminal.
 
 
 def _fmt(seconds: float) -> str:
@@ -270,83 +285,162 @@ def _fmt(seconds: float) -> str:
     return f"{h:d}:{m:02d}:{sec:02d}" if h else f"{m:02d}:{sec:02d}"
 
 
+def _term_width() -> int:
+    try:
+        return shutil.get_terminal_size((80, 24)).columns
+    except Exception:  # noqa: BLE001 - never let sizing crash a redraw
+        return 80
+
+
+# state -> (mark, whether to bold/colour the name). The mark is one visible
+# column wide so the block's cursor math stays simple.
+def _row(name: str, state: str, detail: str, namew: int, width: int) -> str:
+    if state == "running":
+        mark, name_s = f"\033[36m{_frame}\033[0m", f"\033[1;36m{name}\033[0m"
+    elif state == "ok":
+        mark, name_s = "\033[32m✔\033[0m", name
+    elif state == "fail":
+        mark, name_s = "\033[31m✘\033[0m", f"\033[1;31m{name}\033[0m"
+    elif state == "skip":
+        mark, name_s = "\033[2m╌\033[0m", f"\033[2m{name}\033[0m"
+    else:  # pending
+        mark, name_s = "\033[2m·\033[0m", f"\033[2m{name}\033[0m"
+    pad = " " * (namew - len(name))
+    # visible prefix = " " + mark(1) + " " + name(namew) + "  "
+    prefix_vis = 1 + 1 + 1 + namew + 2
+    avail = width - 1 - prefix_vis
+    shown = "" if avail <= 0 else detail[:avail]
+    detail_s = f"\033[2m{shown}\033[0m" if shown else ""
+    return f" {mark} {name_s}{pad}  {detail_s}"
+
+
+def _dashboard_lines() -> list[str]:
+    width = _term_width()
+    elapsed = _fmt(time.time() - _run_start)
+    left, right = "─ gentoo-updater ", f" {elapsed} ─"
+    fill = max(0, width - len(left) - len(right))
+    lines = [f"\033[2m{left}{'─' * fill}{right}\033[0m"]
+    namew = max((len(n) for n in _phases), default=0)
+    for name in _phases:
+        state, detail = _status.get(name, ("pending", ""))
+        lines.append(_row(name, state, detail, namew, width))
+    return lines
+
+
+def _clear_block_locked() -> None:
+    # Move up over the pinned block and wipe it, leaving the cursor where the
+    # block's first line was. Caller holds _lock.
+    global _dash_lines
+    if _dash_lines:
+        sys.stdout.write(f"\033[{_dash_lines}A\r\033[J")
+        sys.stdout.flush()
+        _dash_lines = 0
+
+
+def _repaint_locked() -> None:
+    # Redraw the block in place: step up over the old one (if any), clear to end
+    # of screen, print the fresh lines. Cursor ends just below the block. Caller
+    # holds _lock.
+    global _dash_lines
+    if _dash_lines:
+        sys.stdout.write(f"\033[{_dash_lines}A")
+    lines = _dashboard_lines()
+    sys.stdout.write("\r\033[J" + "\n".join(lines) + "\n")
+    sys.stdout.flush()
+    _dash_lines = len(lines)
+
+
+def _refresh() -> None:
+    if not _active:
+        return
+    with _lock:
+        _repaint_locked()
+
+
 def _animate() -> None:
+    global _frame
     frames = itertools.cycle(_FRAMES)
     while _anim_stop is not None and not _anim_stop.is_set():
-        if _active and _current is not None and not _paused:
-            frame = next(frames)
-            elapsed = _fmt(time.time() - _run_start)
+        if _active and not _paused:
             with _lock:
-                sys.stdout.write(f"\r\033[K\033[36m{frame}\033[0m "
-                                 f"\033[1m{_current}\033[0m  \033[2m{elapsed}\033[0m")
-                sys.stdout.flush()
+                if _current is not None:
+                    _frame = next(frames)
+                _repaint_locked()
+        if _anim_stop is None:
+            break
         _anim_stop.wait(0.1)
 
 
 def begin_run(phase_names: list[str]) -> None:
-    # phase_names is accepted for symmetry; the linear view doesn't preview them.
     global _active, _paused, _current, _run_start, _anim_thread, _anim_stop
+    global _phases, _status, _dash_lines, _frame
     _run_start = time.time()
     _current = None
     _paused = 0
+    _phases = list(phase_names)
+    _status = {name: ("pending", "") for name in _phases}
+    _dash_lines = 0
+    _frame = _FRAMES[0]
     _active = _dashboard_wanted()
     if _active:
         _anim_stop = threading.Event()
         _anim_thread = threading.Thread(target=_animate, daemon=True)
         _anim_thread.start()
+        _refresh()  # paint the initial all-pending checklist right away
 
 
 def phase_start(name: str) -> None:
     global _current
-    _current = name  # the animator picks it up on its next tick
+    _current = name
+    if name in _status:
+        _status[name] = ("running", "")
+    _refresh()  # animator picks up the frame; this shows the switch instantly
 
 
 def phase_done(result) -> None:
     global _current
-    _current = None  # stop animating this phase before we print its result
-    if not _active:
-        return
-    mark = (_MARK["skip"] if result.skipped
-            else _MARK["ok"] if result.ok else _MARK["fail"])
-    _emit(lambda: _console.print(
-        f"{mark} [bold]{result.name}[/bold]  [dim]{result.detail}[/dim]"))
+    _current = None  # stop animating this phase before we mark it
+    state = "skip" if result.skipped else ("ok" if result.ok else "fail")
+    if result.name in _status:
+        _status[result.name] = (state, result.detail)
+    _refresh()
 
 
 @contextlib.contextmanager
 def suspend():
-    # Hand the terminal to a subprocess / prompt / picker: pause the spinner and
-    # wipe its line, then resume for the still-running phase. No-op when idle.
-    # Counted rather than a flag, so a nested suspend (a prompt inside a phase
-    # that's already suspended) doesn't resume the spinner too early.
+    # Hand the terminal to a subprocess / prompt / picker: tear the pinned block
+    # down (so the child scrolls freely) and repaint it below on the way out.
+    # No-op when idle. Counted, so a nested suspend doesn't repaint too early.
     global _paused
     if not _active:
         yield
         return
     _paused += 1
     with _lock:
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
+        _clear_block_locked()
     try:
         yield
     finally:
         _paused -= 1
+        if _active and not _paused:
+            with _lock:
+                _repaint_locked()
 
 
 def end_run(report) -> None:
-    global _active, _current, _anim_thread, _anim_stop
+    global _active, _current, _anim_thread, _anim_stop, _dash_lines
     if _anim_stop is not None:
         _anim_stop.set()
         if _anim_thread is not None:
             _anim_thread.join(timeout=1)
-    if _active:
-        with _lock:
-            sys.stdout.write("\r\033[K")
-            sys.stdout.flush()
+    with _lock:
+        _clear_block_locked()
     elapsed = _fmt(time.time() - _run_start) if _run_start else ""
     _active = False
     _current = None
     _anim_thread = None
     _anim_stop = None
+    _dash_lines = 0
     show_summary(report)
     if elapsed:
         _console.print(f"[dim]elapsed {elapsed}[/dim]") if _HAVE_RICH \

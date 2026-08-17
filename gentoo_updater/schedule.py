@@ -50,7 +50,10 @@ def detect_init(*, comm_path: str = "/proc/1/comm", which=shutil.which) -> str |
         return INIT_SYSTEMD
     if comm in ("runit", "runsvdir", "runsv") or which("runsvdir"):
         return INIT_RUNIT
-    if which("openrc") or which("rc-update") or which("openrc-run"):
+    # sysvinit-style pid 1 on Gentoo is OpenRC driving /sbin/init, so comm is
+    # "init" there; "openrc" covers setups that exec it directly.
+    if (comm in ("openrc", "init") or which("openrc") or which("rc-update")
+            or which("openrc-run")):
         return INIT_OPENRC
     return None
 

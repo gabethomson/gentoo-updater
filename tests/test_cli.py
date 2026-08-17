@@ -6,6 +6,7 @@ import contextlib
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -65,6 +66,54 @@ class EffectiveConfig(unittest.TestCase):
 
     def test_no_audit_turns_audit_off(self):
         self.assertFalse(self._cfg(["--no-audit", "update"]).audit)
+
+
+class RootGuard(unittest.TestCase):
+    """`sudo gup <portage command>` must be refused (with an opt-out), while
+    the schedule installers -- which legitimately need root -- are not."""
+
+    def _cfg(self, argv):
+        args = cli.build_parser().parse_args(argv)
+        args.config = "/nonexistent/gup-test.toml"
+        return cli._effective_config(args)
+
+    @contextlib.contextmanager
+    def _euid(self, uid):
+        with mock.patch("gentoo_updater.cli.os.geteuid", return_value=uid), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            yield
+
+    def test_refuses_root_without_no_sudo(self):
+        with self._euid(0):
+            self.assertTrue(cli._refuse_root(self._cfg(["update"])))
+
+    def test_allows_root_with_no_sudo(self):
+        # The explicit opt-out: a root shell or the systemd unit.
+        with self._euid(0):
+            self.assertFalse(cli._refuse_root(self._cfg(["--no-sudo", "update"])))
+
+    def test_allows_normal_user(self):
+        with self._euid(1000):
+            self.assertFalse(cli._refuse_root(self._cfg(["update"])))
+
+    def test_dispatch_update_as_root_aborts_before_touching_portage(self):
+        args = cli.build_parser().parse_args(["update"])
+        args.config = "/nonexistent/gup-test.toml"
+        with self._euid(0), \
+             mock.patch.object(cli, "_make_updater") as make, \
+             mock.patch("gentoo_updater.cli.single_instance") as lock:
+            rc = cli._dispatch(args)
+        self.assertEqual(rc, 1)
+        make.assert_not_called()   # never built an updater
+        lock.assert_not_called()   # never took the lock / ran a merge
+
+    def test_schedule_install_not_blocked_as_root(self):
+        # install-* writes to /etc and returns before the guard, so root is fine.
+        args = cli.build_parser().parse_args(
+            ["--dry-run", "--init", "systemd", "install-schedule"])
+        with self._euid(0):
+            self.assertEqual(cli._dispatch(args), 0)
 
 
 if __name__ == "__main__":

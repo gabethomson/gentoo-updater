@@ -431,6 +431,12 @@ class Updater:
         if self._excludes:
             cmd += ["--exclude", " ".join(self._excludes)]  # same as the plan step
         res = self.run.stream(cmd)
+        if self.run.dry_run:
+            # stream() short-circuits under dry-run and reports rc=0; don't let
+            # that masquerade as a merge that actually happened (in the summary,
+            # the audit log, or reboot advice).
+            return PhaseResult("apply", ok=True, skipped=True,
+                               detail="dry-run: not applied")
         if res.returncode != 0:
             ui.error("emerge @world exited non-zero. Some packages may have failed.")
             ui.hint("Inspect with: emerge --resume  (or --resume --skipfirst)")

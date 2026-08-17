@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 
@@ -113,6 +114,28 @@ def _effective_config(args):
     return cfg.merged_with_cli(overrides)
 
 
+def _refuse_root(cfg) -> bool:
+    """Stop a `sudo gup` (or root) invocation of a portage command.
+
+    gup is meant to run as a regular user and escalate the individual commands
+    that need root with sudo, so the dashboard, the snapshot, and any config
+    edits keep the user's context and only the operations that truly need root
+    touch it. Running the whole thing as root defeats that -- and every internal
+    sudo becomes a no-op, so the user is never actually prompted. Someone who
+    genuinely wants to run as root (a root shell, the systemd unit) says so with
+    --no-sudo / no_sudo, which is the explicit opt-out. Returns True if the
+    caller should abort.
+    """
+    if cfg.no_sudo or os.geteuid() != 0:
+        return False
+    ui.error("Don't run gup with sudo or as root.")
+    ui.hint("Run it as your regular user. gup asks for your password itself "
+            "when a step needs root (sync, the snapshot, the world merge).")
+    ui.hint("If you really do mean to run as root (e.g. automation), "
+            "pass --no-sudo.")
+    return True
+
+
 def _make_updater(args, cfg) -> Updater:
     runner = CommandRunner(dry_run=args.dry_run, use_sudo=not cfg.no_sudo)
     snapshots = SnapshotManager(runner)
@@ -209,6 +232,8 @@ def _dispatch(args) -> int:
         return _install_schedule(args, backend=schedule.BACKEND_SYSTEMD)
 
     cfg = _effective_config(args)
+    if _refuse_root(cfg):
+        return 1
     updater = _make_updater(args, cfg)
 
     if args.command == "update":

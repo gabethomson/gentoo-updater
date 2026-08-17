@@ -73,35 +73,82 @@ class InactiveWithoutTty(unittest.TestCase):
         self.assertIsNone(ui._current)
 
 
-@unittest.skipUnless(ui._HAVE_RICH, "rich not installed")
-class PhaseLine(unittest.TestCase):
-    """Force the spinner active with a StringIO console and check the permanent
-    line printed for each finished phase."""
+class PhaseBlock(unittest.TestCase):
+    """Force the dashboard active and capture the raw-ANSI block written to
+    stdout when a phase finishes. The block is the checklist, so a finished
+    phase shows its mark, name, and detail there (no rich needed)."""
 
-    def _line(self, result):
-        from rich.console import Console
+    def _block(self, result):
         buf = io.StringIO()
-        orig_console, orig_active = ui._console, ui._active
-        ui._console = Console(file=buf, width=80)
+        orig_active, orig_phases, orig_status, orig_lines = (
+            ui._active, ui._phases, ui._status, ui._dash_lines)
         ui._active = True
+        ui._phases = [result.name]
+        ui._status = {result.name: ("running", "")}
+        ui._dash_lines = 0
+        ui._run_start = 0.0
         try:
-            ui.phase_done(result)
+            with contextlib.redirect_stdout(buf):
+                ui.phase_done(result)
         finally:
-            ui._console, ui._active = orig_console, orig_active
+            (ui._active, ui._phases, ui._status, ui._dash_lines) = (
+                orig_active, orig_phases, orig_status, orig_lines)
         return buf.getvalue()
 
-    def test_ok_line(self):
-        out = self._line(PhaseResult("plan", ok=True, detail="17 pending"))
-        self.assertIn("OK", out)
+    def test_ok_row(self):
+        out = self._block(PhaseResult("plan", ok=True, detail="17 pending"))
+        self.assertIn("✔", out)
         self.assertIn("plan", out)
         self.assertIn("17 pending", out)
 
-    def test_fail_line(self):
-        self.assertIn("XX", self._line(PhaseResult("sync", ok=False, detail="boom")))
+    def test_fail_row(self):
+        self.assertIn("✘", self._block(PhaseResult("sync", ok=False, detail="boom")))
 
-    def test_skip_line(self):
-        out = self._line(PhaseResult("snapshot", ok=True, skipped=True, detail="x"))
-        self.assertIn("--", out)
+    def test_skip_row(self):
+        out = self._block(PhaseResult("snapshot", ok=True, skipped=True, detail="x"))
+        self.assertIn("╌", out)
+
+
+class DashboardRender(unittest.TestCase):
+    """The pure block renderer and the in-place cursor accounting, both
+    checkable without a real terminal."""
+
+    def setUp(self):
+        ui._run_start = 0.0
+        ui._frame = "@"  # a distinctive running mark for the assertion
+        ui._phases = ["preflight", "apply", "verify"]
+        ui._status = {
+            "preflight": ("ok", "all good"),
+            "apply": ("running", ""),
+            "verify": ("pending", ""),
+        }
+
+    def test_lines_cover_header_plus_every_phase(self):
+        lines = ui._dashboard_lines()
+        self.assertEqual(len(lines), 1 + len(ui._phases))  # header + one per phase
+        body = "\n".join(lines)
+        for name in ui._phases:
+            self.assertIn(name, body)
+        self.assertIn("gentoo-updater", lines[0])
+        self.assertIn("@", body)   # the running phase shows the frame
+        self.assertIn("✔", body)   # the ok phase shows its mark
+
+    def test_repaint_tracks_line_count_and_redraws_in_place(self):
+        orig_active, orig_lines = ui._active, ui._dash_lines
+        ui._active = True
+        ui._dash_lines = 0
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                ui._refresh()                     # first paint: no cursor-up
+                first = ui._dash_lines
+                self.assertEqual(first, 1 + len(ui._phases))
+                self.assertNotIn("\033[", buf.getvalue().split("\n")[0][:1] or "")
+                ui._refresh()                     # second paint steps up first
+        finally:
+            ui._active, ui._dash_lines = orig_active, orig_lines
+        # the second repaint must move the cursor up over the first block
+        self.assertIn(f"\033[{first}A", buf.getvalue())
 
 
 if __name__ == "__main__":

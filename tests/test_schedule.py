@@ -40,6 +40,19 @@ class DetectInit(unittest.TestCase):
                                  which=_which_stub({"rc-update"})),
             schedule.INIT_OPENRC)
 
+    def test_openrc_detected_by_comm(self):
+        # sysvinit-style pid 1 on Gentoo is OpenRC driving /sbin/init.
+        for comm in ("init", "openrc"):
+            with tempfile.NamedTemporaryFile("w", suffix="comm", delete=False) as f:
+                f.write(comm + "\n")
+                path = f.name
+            try:
+                self.assertEqual(
+                    schedule.detect_init(comm_path=path, which=_which_stub(set())),
+                    schedule.INIT_OPENRC)
+            finally:
+                os.unlink(path)
+
     def test_systemctl_wins_over_missing_comm(self):
         self.assertEqual(
             schedule.detect_init(comm_path="/nonexistent",

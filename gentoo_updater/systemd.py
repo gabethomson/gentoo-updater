@@ -3,8 +3,6 @@ easy to test. The service runs as root already, hence --no-sudo."""
 
 from __future__ import annotations
 
-import os
-
 SERVICE_NAME = "gentoo-updater.service"
 TIMER_NAME = "gentoo-updater.timer"
 DEFAULT_DEST = "/etc/systemd/system"
@@ -52,15 +50,3 @@ def unit_files(exec_path: str = "gup", extra_args: str = "-y --no-sudo",
         SERVICE_NAME: service_unit(exec_path, extra_args),
         TIMER_NAME: timer_unit(on_calendar),
     }
-
-
-def install_units(files: dict[str, str], dest: str = DEFAULT_DEST) -> list[str]:
-    # Raises OSError (PermissionError when not root); caller falls back to printing.
-    written: list[str] = []
-    os.makedirs(dest, exist_ok=True)
-    for name, text in files.items():
-        path = os.path.join(dest, name)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        written.append(path)
-    return written

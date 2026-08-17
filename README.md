@@ -102,6 +102,14 @@ gup install-schedule  # set up unattended runs (auto-detects your init)
 gup install-timer     # = install-schedule --init systemd
 ```
 
+**Run `gup` as your regular user, not with `sudo`.** It escalates the individual
+steps that need root (sync, the snapshot, the world merge) with `sudo` itself,
+so it prompts for your password when it gets there while the dashboard, news,
+and plan stay in your own user context. Running `sudo gup` is refused with a
+hint. If you really do need to run as root — a root shell, or the systemd unit —
+pass `--no-sudo` (or set `no_sudo = true`) to skip both the guard and the
+internal `sudo`.
+
 ### Flags
 
 | Flag | Effect |
@@ -127,13 +135,19 @@ scheduler uses.
 
 ## While it runs
 
-With `rich` on a real terminal, `gup` shows a live checklist pinned to the bottom
-of the screen: a spinner on the current phase and a running clock. Finished
-phases show `OK` (or a red one on failure).
+With `rich` on a real terminal, `gup` pins the full phase checklist to the bottom
+of the screen with a running clock in the header. Each row shows its state as it
+goes: `·` pending, an animated spinner on the phase in progress, `✔` done, `✘`
+failed, `╌` skipped, each with a one-line detail. Warnings and the plan table
+scroll into history above the pinned block.
 
-During the streaming phases (sync, the real `emerge`, `dispatch-conf`) the panel
-drops so Portage streams its own output normally, then comes back. Piped output,
-cron, or no `rich` falls back to plain output. Force that anywhere with `--plain`.
+During the streaming phases (sync, the real `emerge`, `dispatch-conf`) the block
+drops so Portage streams its own output normally, then repaints below it. Piped
+output, cron, or no `rich` falls back to plain linear output. Force that anywhere
+with `--plain`.
+
+Want to see it without kicking off a real update? `python contrib/ui-demo.py`
+fakes a full run (add `--plain` or `--fail` to see those paths).
 
 ## Phases
 
@@ -215,8 +229,8 @@ notify_email  = ""
 audit         = true
 ```
 
-Needs Python 3.11+ (`tomllib`); older interpreters ignore the file and use
-defaults.
+Requires Python 3.11+ (for stdlib `tomllib`). A missing or malformed config
+file falls back to the built-in defaults.
 
 ## Audit log & notifications
 
@@ -265,6 +279,8 @@ you.
 - `--dry-run` runs no mutating command (snapshot creation included) and skips the
   audit write and notifications. Read-only checks still run, so it reflects real
   state. (It still writes the debug log — that's a diagnostic, not a system change.)
+  Phases that would have mutated (`apply`, and anything requiring root) report
+  `skipped` rather than `ok`, since nothing actually ran.
 - depclean is opt-in and always asks before removing.
 
 ## Status

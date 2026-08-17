@@ -3,17 +3,13 @@
 Precedence, low to high: defaults -> /etc/gentoo-updater.toml ->
 ~/.config/gentoo-updater/config.toml -> command-line flags.
 
-TOML via stdlib tomllib (3.11+). No file or no tomllib just means defaults."""
+TOML via stdlib tomllib (3.11+). A missing or malformed file just means defaults."""
 
 from __future__ import annotations
 
 import os
+import tomllib
 from dataclasses import dataclass, fields
-
-try:  # tomllib is stdlib from 3.11; degrade gracefully below it.
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - depends on interpreter version
-    tomllib = None  # type: ignore[assignment]
 
 SYSTEM_PATH = "/etc/gentoo-updater.toml"
 
@@ -63,7 +59,7 @@ class Config:
 def _coerce(raw: dict) -> dict:
     # Keep known keys, coerce to the right type, ignore the rest (typos, keys
     # from a newer version) instead of blowing up.
-    known = {f.name: f.type for f in fields(Config)}
+    known = {f.name for f in fields(Config)}
     out: dict = {}
     for key, val in raw.items():
         norm = key.replace("-", "_")
@@ -84,9 +80,7 @@ def _coerce(raw: dict) -> dict:
 
 
 def parse_config_text(text: str) -> dict:
-    # Bad TOML (or no tomllib) -> empty dict, and defaults win.
-    if tomllib is None:
-        return {}
+    # Bad TOML -> empty dict, and defaults win.
     try:
         raw = tomllib.loads(text)
     except (tomllib.TOMLDecodeError, ValueError):

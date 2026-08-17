@@ -3,7 +3,6 @@
 
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,20 +26,6 @@ class Render(unittest.TestCase):
     def test_unit_files_bundle_both(self):
         files = systemd.unit_files()
         self.assertEqual(set(files), {systemd.SERVICE_NAME, systemd.TIMER_NAME})
-
-
-class Install(unittest.TestCase):
-    def test_writes_both_units(self):
-        files = systemd.unit_files(exec_path="gup")
-        with tempfile.TemporaryDirectory() as d:
-            written = systemd.install_units(files, dest=d)
-            self.assertEqual(len(written), 2)
-            for path in written:
-                self.assertTrue(os.path.exists(path))
-
-    def test_raises_on_unwritable_dest(self):
-        with self.assertRaises(OSError):
-            systemd.install_units(systemd.unit_files(), dest="/proc/nope/systemd")
 
 
 if __name__ == "__main__":

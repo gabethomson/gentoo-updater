@@ -8,11 +8,10 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from gentoo_updater.config import (
-    Config, parse_config_text, load_config, tomllib,
+    Config, parse_config_text, load_config,
 )
 
 
-@unittest.skipIf(tomllib is None, "tomllib unavailable on this interpreter")
 class ParseConfig(unittest.TestCase):
     def test_reads_known_keys_and_coerces_types(self):
         text = """\
@@ -68,7 +67,6 @@ class LoadConfig(unittest.TestCase):
         cfg = load_config(["/nonexistent/a.toml", "/nonexistent/b.toml"])
         self.assertEqual(cfg, Config())
 
-    @unittest.skipIf(tomllib is None, "tomllib unavailable")
     def test_later_path_overrides_earlier(self):
         import tempfile
         with tempfile.TemporaryDirectory() as d:

@@ -41,8 +41,9 @@ class FakeRunner:
     given command; returning None (the default) yields a successful empty result.
     """
 
-    def __init__(self, handler=None):
+    def __init__(self, handler=None, dry_run=False):
         self._handler = handler or (lambda cmd: None)
+        self.dry_run = dry_run
         self.calls: list[list[str]] = []
 
     def _result(self, cmd):
@@ -99,8 +100,9 @@ def _which_stub(present):
 
 def make_updater(handler=_happy_handler, *, snapshots_available=False,
                  snapshots=None, interactive=False, assume_yes=True,
-                 include_depclean=False, select=False, selector=None):
-    runner = FakeRunner(handler)
+                 include_depclean=False, select=False, selector=None,
+                 dry_run=False):
+    runner = FakeRunner(handler, dry_run=dry_run)
     snaps = FakeSnapshots(available=snapshots_available, snapshots=snapshots)
     updater = Updater(runner, snaps, interactive=interactive, assume_yes=assume_yes,
                       include_depclean=include_depclean, select=select,
@@ -216,6 +218,30 @@ class RunAllPipeline(unittest.TestCase):
             any("@world" in c and "--pretend" not in c for c in runner.calls),
             "nothing to do -> no real emerge",
         )
+
+    def test_dry_run_reports_apply_skipped_not_applied(self):
+        # A glibc upgrade is pending; under dry-run the merge never runs, so
+        # apply must report skipped (not a phantom "world updated") and no
+        # reboot should be advised off an update that didn't happen.
+        pretend = (
+            "[ebuild     U   ] sys-libs/glibc-2.40-r1  0 KiB\n"
+            "Total: 1 package, Size of downloads: 0 KiB\n"
+        )
+
+        def handler(cmd):
+            if cmd[:2] == ["emerge", "--pretend"]:
+                return CommandResult(0, stdout=pretend)
+            return _happy_handler(cmd)
+
+        updater, _ = make_updater(handler, dry_run=True)
+        with _quiet(), env(BASE_TOOLS):
+            report = updater.run_all()
+
+        apply = _phase(report, "apply")
+        self.assertTrue(apply.skipped)
+        self.assertIn("dry-run", apply.detail)
+        self.assertFalse(report.failed)
+        self.assertEqual(report.reboot_pkgs, [])
 
     def test_apply_failure_is_not_fatal_verify_still_runs(self):
         def handler(cmd):
