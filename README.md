@@ -8,17 +8,17 @@ Every command it runs is printed to the terminal, prefixed with `$`. Nothing is
 hidden.
 
 ```
-── gentoo-updater ───────────────────────────────
-  OK preflight   optional tools ok; 42.1 GiB free
-  OK news        no unread news
-  OK sync        all repos synced
-  OK plan        17 package(s) pending
-  OK glsa        no known vulnerabilities
-  OK snapshot    created snapper#42
-  ⠋  apply
-     config
-     verify
-  elapsed 04:18
+─ gentoo-updater ───────────────────────────────  04:18 ─
+ ✔ preflight     optional tools ok; 42.1 GiB free
+ ✔ news          no unread news
+ ✔ sync          all repos synced
+ ✔ plan          17 package(s) pending
+ ✔ glsa          no known vulnerabilities
+ ✔ snapshot      created snapper#42
+ ⠹ apply
+ · config
+ · post-update
+ · verify
 ```
 
 ## What it does
@@ -37,7 +37,7 @@ emerge @module-rebuild
 `gup` runs that, and also:
 
 - Takes a btrfs/snapper snapshot before applying (`gup rollback` restores it).
-- Flags high-risk packages in the plan (gcc, glibc, systemd, kernel, llvm, rust, python).
+- Flags high-risk packages in the plan (gcc, glibc, systemd, kernel, binutils, clang, llvm, rust, python).
 - Lets you cherry-pick packages to update with `--select`.
 - Runs `glsa-check` for known vulnerabilities.
 - Warns on unread news, and flags any unread item that's about a package you're updating.
@@ -74,7 +74,7 @@ pipx install 'gentoo-updater[pretty] @ git+https://github.com/gabethomson/gentoo
 echo "app-admin/gentoo-updater ~amd64" | sudo tee /etc/portage/package.accept_keywords/gentoo-updater
 sudo emerge -av app-admin/gentoo-updater
 
-# with colour and the animated status line:
+# with colour and the live dashboard:
 sudo USE="rich" emerge -av app-admin/gentoo-updater
 ```
 
